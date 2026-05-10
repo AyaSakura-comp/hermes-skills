@@ -24,7 +24,7 @@ trigger: 當使用者要求備份技能、同步技能到 GitHub 或在新增重
    `git commit -m "Backup skills: $(date +'%Y-%m-%d %H:%M:%S')"`
 
 5. **推送至 GitHub**：
-   執行 `git push origin main` 將變更推送至遠端儲存庫 `git@github.com:AyaSakura-comp/hermes_skills.git`。
+   執行 `git push origin main` 將變更推送至遠端儲存庫 `git@github.com:AyaSakura-comp/hermes-skills.git`。
 
 ## 注意事項與陷阱
 
