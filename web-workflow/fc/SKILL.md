@@ -12,12 +12,7 @@ category: web-workflow
 - Firecrawl API key in `~/.hermes/.env` as `FIRECRAWL_API_KEY`.
 - Firecrawl SDK installed in the venv: `uv pip install firecrawl-py --python venv/bin/python`.
 
-**Steps**:
-1. **Parse Input**: Capture the user-provided query after `/fc`.
-2. **Web Search**:
-   - Call `web_search` with the query, requesting up to 5 results.
-   - Extract the `url` field from each result.
-3. **Firecrawl Scrape** (for each URL):
+**Steps**:\n1. **Parse Input**: Check if input is a URL (starts with `http`) or a search query.\n2. **URL Mode** (if input is a URL like `/fc https://x.com/...`):\n   - **Try 1**: `npx -y firecrawl@latest scrape "<url>"` (CLI approach)\n   - **Try 2**: Python SDK `FirecrawlApp(api_key).scrape(url, formats=['markdown'])`\n   - **Fallback** (for X/Twitter or blocked sites): Browser automation workflow:\n     a. `mcp_chrome_devtools_new_page(url=<url>)`\n     b. `mcp_chrome_devtools_take_screenshot(fullPage=true, filePath=/tmp/page.png)`\n     c. `vision_analyze(image_url=/tmp/page.png, question="Extract all text content")`\n     d. Alternative: `mcp_chrome_devtools_evaluate_script` to extract DOM text\n3. **Search Mode** (if input is a query):\n   - Call `web_search` with the query, requesting up to 5 results.\n   - Extract the `url` field from each result.\n4. **Firecrawl Scrape** (for each URL in Search Mode):\n   - Use the Firecrawl SDK to scrape the content.
    - Use the Firecrawl SDK to scrape the content.
    - **Python Implementation Pattern**:
      ```python
@@ -50,6 +45,11 @@ category: web-workflow
 - **Pydantic Objects**: The SDK returns a `Document` object; use `result.markdown`, not `result['markdown']`.
 - **Auth**: The SDK does NOT auto-read `FIRECRAWL_API_KEY` from env; it must be passed explicitly.
 - **Anti-Bot Protection**: Some sites block the SDK's playwright backend. The `npx firecrawl-cli` is the recommended workaround for these cases.
+- **X/Twitter**: Often blocks Firecrawl entirely (returns `InternalServerError`). Use browser automation fallback:
+  1. Open URL via `mcp_chrome_devtools_new_page`
+  2. Take full-page screenshot with `mcp_chrome_devtools_take_screenshot(fullPage=true)`
+  3. Extract text using `vision_analyze` on the screenshot
+  4. Alternatively, use `mcp_chrome_devtools_evaluate_script` to extract DOM text directly
 
 **Verification**:
 - After running `/fc test query`, verify that:
