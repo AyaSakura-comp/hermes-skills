@@ -50,6 +50,10 @@ category: web-workflow
   2. Take full-page screenshot with `mcp_chrome_devtools_take_screenshot(fullPage=true)`
   3. Extract text using `vision_analyze` on the screenshot
   4. Alternatively, use `mcp_chrome_devtools_evaluate_script` to extract DOM text directly
+- **Government / Weather Sites** (e.g., CWA/中央氣象署 for 台灣天氣):
+  - Web search for real-time weather may return only climate averages or outdated summary pages instead of current forecasts.
+  - Target government sites (cwa.gov.tw, etc.) often block both `web_extract` and Firecrawl SDK.
+  - Workaround: use browser automation (`mcp_chrome_devtools_take_snapshot`) on the official forecast page for structured, parseable text — prefer `take_snapshot` over `vision_analyze` when the page has well-structured tables/lists.
 
 **Verification**:
 - After running `/fc test query`, verify that:

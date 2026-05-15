@@ -36,27 +36,31 @@ Ask Google Gemini a question via browser automation at gemini.google.com.
 
 5. **Wait a few seconds** for Gemini to generate a response.
 
-6. **Read the answer with `browser_vision`:**
+7. **Read the answer — use `browser_console` for long responses (RECOMMENDED):**
    ```
-   browser_vision(question='Describe Gemini\'s complete answer in detail, including all key points, formatting, and any code blocks or structured content.')
+   browser_console(expression='document.querySelector("main").innerText')
+   ```
+   This extracts the FULL response text from the DOM in one shot. Never scroll through screenshots for long Gemini responses — it's inefficient and often misses sections.
+
+   If `browser_console` fails or returns empty, fall back to `browser_vision`:
+   ```
+   browser_vision(question='Read ALL of Gemini\'s response text from the beginning. Include ALL sections, bullet points, and data. Don\'t stop until you\'ve read everything Gemini wrote.')
    ```
 
-7. **Send screenshot via Discord** using MEDIA: path format (see Important Notes below):
+8. **Send text result via Discord** (default — no screenshot):
    ```
-   # Take a vision screenshot for the Discord message
-   result = browser_vision(question='Describe the full page including Gemini\'s question and answer together.')
-   # result contains screenshot_path — use it as MEDIA: attachment
-   send_message(message='MEDIA:<screenshot_path>\n\n[Summary text]', target='discord')
+   send_message(message='<formatted text summary>', target='discord')
    ```
+
+   除非使用者特別要求截圖，否則預設只傳文字結果。
 
 ## Important Notes
 
 - **Always use `browser_vision` to read answers** — `browser_snapshot` does not capture Gemini's rich content well.
-- **When sending screenshots, always use `MEDIA: <path>` format** via `send_message`, NEVER use markdown image links. This ensures Discord delivers it as a proper image attachment.
+- **預設不傳截圖**，只傳送文字結果摘要。使用者明確要求時才額外傳截圖。
 - If the send button is disabled, the input might be empty or validation is needed. Try clicking elsewhere first.
 - If Gemini takes too long to respond (>5s), wait a bit then try `browser_vision` again.
 - The page may show a "Temporary chat" banner near the top — this is normal, proceed regardless.
-- Always send screenshots/images via Discord as full image attachments, not just file paths.
 
 ## When to Use
 
