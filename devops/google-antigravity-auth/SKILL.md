@@ -11,12 +11,9 @@ metadata:
 
 # Google Antigravity (Cloud Code Assist) Auth
 
-This skill covers the configuration and authentication process for using Google's Cloud Code Assist backend (branded as **Antigravity**) as an inference provider in Hermes. Unlike standard Gemini API keys, this uses an OAuth 2.0 PKCE flow.
+This skill covers the **OAuth authentication flow** for using Google Cloud Code Assist as an inference provider in Hermes (OAuth 2.0 PKCE to `cloudcode-pa.googleapis.com`).
 
-## Identification
-- **Branding**: Users may refer to this as "Google Antigravity".
-- **Backend**: Uses `cloudcode-pa.googleapis.com`.
-- **Hermes Provider**: Typically configured as a `custom` provider using the `gemini-native-adapter` or `gemini-cloudcode-adapter`.
+⚠️ **Important distinction**: Do NOT confuse this with **Google Antigravity 2.0**, which is a separate, actual desktop application (Electron app + CLI called `agy`). That product lives at `https://www.antigravity.google/` and is downloaded from `storage.googleapis.com/antigravity-public/`. For that product's installation, see `google-antigravity-product` skill.
 
 ## Setup Process
 

@@ -22,29 +22,39 @@ Ask Google Gemini a question via browser automation at gemini.google.com.
    browser_navigate(url='https://gemini.google.com')
    ```
 
-2. **Wait for page to load and find input field.** Use `browser_snapshot` or `browser_vision(annotate=true)` to locate the textarea. Look for a textbox labeled "Enter a prompt for Gemini". Note its ref (e.g., `@e12`). Also note the send button ref (e.g., `@e10`).
+2. **Verify the correct page loaded:** Immediately check `browser_snapshot`. If the page is NOT Gemini (e.g., landed on AssetSentry, Facebook, etc.), the browser has a tab-switching issue:
+   ```
+   # Check all open tabs via CDP
+   browser_cdp(method='Target.getTargets', params={})
+   # Navigate again with full URL including /app if needed
+   browser_navigate(url='https://gemini.google.com/app')
+   ```
 
-3. **Type the question:**
+3. **Wait for page to load and find input field.** Use `browser_snapshot` to locate the textarea. Look for a textbox labeled "Enter a prompt for Gemini". Note its ref (e.g., `@e17`). Also note the send button ref (e.g., `@e13`).
+
+4. **Type the question:**
    ```
    browser_type(ref='@<input_ref>', text='<your question>')
    ```
 
-4. **Click the send button:**
+5. **Submit:** Click the send button OR press Enter:
    ```
    browser_click(ref='@<send_button_ref>')
+   # OR
+   browser_press(key='Enter')
    ```
 
-5. **Wait a few seconds** for Gemini to generate a response.
+6. **Wait for response:** Gemini's response may take multiple polling cycles before rendering. Poll with `browser_vision` or `browser_snapshot` until you see the response text appear (indicated by a sparkle/typing indicator disappearing).
 
 7. **Read the answer — use `browser_console` for long responses (RECOMMENDED):**
    ```
-   browser_console(expression='document.querySelector("main").innerText')
+   browser_console(expression='document.querySelector("main")?.innerText || document.querySelector(".wEwyrc")?.innerText || "not found"')
    ```
-   This extracts the FULL response text from the DOM in one shot. Never scroll through screenshots for long Gemini responses — it's inefficient and often misses sections.
+   ⚠️ The old selector `document.querySelector("main").innerText` often returns `null` and fails. Always use optional chaining (`?.`) and fallback selectors.
 
    If `browser_console` fails or returns empty, fall back to `browser_vision`:
    ```
-   browser_vision(question='Read ALL of Gemini\'s response text from the beginning. Include ALL sections, bullet points, and data. Don\'t stop until you\'ve read everything Gemini wrote.')
+   browser_vision(question='Read ALL of Gemini\\'s response text from the beginning. Include ALL sections, bullet points, and data. Don\\'t stop until you\\'ve read everything Gemini wrote.')
    ```
 
 8. **Send text result via Discord** (default — no screenshot):
@@ -56,10 +66,12 @@ Ask Google Gemini a question via browser automation at gemini.google.com.
 
 ## Important Notes
 
-- **Always use `browser_vision` to read answers** — `browser_snapshot` does not capture Gemini's rich content well.
+- **Always verify page URL after navigation.** The browser tool may land on a different tab (AssetSentry, Facebook, etc.) — check `browser_snapshot` title/URL immediately.
+- **CDP for tab debugging:** If navigation lands on the wrong page, use `browser_cdp(method='Target.getTargets')` to inspect all open tabs.
+- **`browser_console` requires robust selectors:** Never use `document.querySelector("main").innerText` (it returns null). Use `?.` optional chaining and fallback selectors.
 - **預設不傳截圖**，只傳送文字結果摘要。使用者明確要求時才額外傳截圖。
-- If the send button is disabled, the input might be empty or validation is needed. Try clicking elsewhere first.
-- If Gemini takes too long to respond (>5s), wait a bit then try `browser_vision` again.
+- If the send button is disabled, the input might be empty. Try clicking elsewhere first.
+- Gemini's response rendering can be delayed — poll with vision/snapshot until text appears.
 - The page may show a "Temporary chat" banner near the top — this is normal, proceed regardless.
 
 ## When to Use
