@@ -22,6 +22,8 @@
 #   -S          Clarity-repair post-processing: run the generated song through audio-separator
 #               (UVR-MDX-NET-Inst_HQ_4 on GPU), splitting into vocals+instrumental and summing
 #               the cleaned stems back -> a subtle de-noise / de-mud pass. Keeps vocals.
+#   -C          Compile MuLa model using TorchDynamo for accelerated generation
+#               (recommended for long runs, e.g., > 3 minutes).
 #
 # Requires: heartlib deployed at this dir with .venv (torch 2.11+rocm7.2), ./ckpt models.
 # Notes: runs on GPU with --lazy_load (peaks ~6.2GB). Generation is ~RTF 1 (a 4min song ≈ a few min).
@@ -32,14 +34,14 @@ HERE="${HEARTLIB_DIR:-$HOME/src/heartlib}"
 PY="$HERE/.venv/bin/python"
 [ -x "$PY" ] || { echo "ERROR: heartlib venv not found at $HERE/.venv (set HEARTLIB_DIR)"; exit 1; }
 TAGS=""; LYRICS_FILE=""; LYRICS_TEXT=""; OUT="./assets/output.mp3"
-DUR=240; TEMP=1.0; CFG=1.5; TOPK=50; CSTEPS=""; QUALITY="high"; MP3_BR=""; CLARITY=0
+DUR=240; TEMP=1.0; CFG=1.5; TOPK=50; CSTEPS=""; QUALITY="high"; MP3_BR=""; CLARITY=0; COMPILE=0
 
-while getopts "t:l:L:o:d:T:c:k:q:Q:S" opt; do
+while getopts "t:l:L:o:d:T:c:k:q:Q:SC" opt; do
   case "$opt" in
     t) TAGS="$OPTARG" ;; l) LYRICS_FILE="$OPTARG" ;; L) LYRICS_TEXT="$OPTARG" ;;
     o) OUT="$OPTARG" ;; d) DUR="$OPTARG" ;; T) TEMP="$OPTARG" ;;
     c) CFG="$OPTARG" ;; k) TOPK="$OPTARG" ;; q) CSTEPS="$OPTARG" ;;
-    Q) QUALITY="$OPTARG" ;; S) CLARITY=1 ;;
+    Q) QUALITY="$OPTARG" ;; S) CLARITY=1 ;; C) COMPILE=1 ;;
     *) exit 2 ;;
   esac
 done
@@ -53,6 +55,7 @@ esac
 
 cd "$HERE"
 export PYTHONUTF8=1
+export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
 
 # Resolve tags file
 TAGS_PATH="./assets/tags.txt"
@@ -81,14 +84,19 @@ case "${OUT,,}" in
   *.mp3) GEN_OUT="$(mktemp /tmp/cm_gen.XXXX.wav)" ;;
   *)     GEN_OUT="$OUT" ;;
 esac
-echo "[gen] quality=$QUALITY (mp3 $MP3_BR, codec_steps=$CSTEPS) len=${DUR}s -> $OUT"
+COMPILE_FLAG="false"
+if [ "$COMPILE" = 1 ]; then
+  COMPILE_FLAG="true"
+fi
+
+echo "[gen] quality=$QUALITY (mp3 $MP3_BR, codec_steps=$CSTEPS, compile=$COMPILE_FLAG) len=${DUR}s -> $OUT"
 
 "$PY" ./examples/run_music_generation.py \
   --model_path=./ckpt --version="3B" --lazy_load false --codec_dtype bfloat16 \
   --tags "$TAGS_PATH" --lyrics "$LYRICS_PATH" \
   --max_audio_length_ms "$DUR_MS" \
   --temperature "$TEMP" --cfg_scale "$CFG" --topk "$TOPK" \
-  --codec_steps "$CSTEPS" \
+  --codec_steps "$CSTEPS" --compile "$COMPILE_FLAG" \
   --save_path "$GEN_OUT" 2>&1 | grep -aviE "MIOpen|IsEnoughWorkspace" | tail -5
 
 if [ "$GEN_OUT" != "$OUT" ]; then

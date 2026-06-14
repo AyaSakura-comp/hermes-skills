@@ -52,6 +52,7 @@ Options:
   - `high` — 320kbps mp3 + codec_steps 16 (best fidelity).
   - `low` — 128kbps mp3 + codec_steps 8 (faster, smaller — drafts/quick previews).
 - `-q STEPS` — override the preset's HeartCodec decode steps (higher = better fidelity, slower).
+- `-C` — compile the MuLa model using TorchDynamo (recommended for long runs, e.g., > 3 minutes).
 
 ### Audio quality
 
@@ -136,9 +137,9 @@ Key flags: `--tags`/`--lyrics` (file paths), `--max_audio_length_ms`, `--tempera
 
 ## Performance & hardware (Strix Halo gfx1151, ROCm 7.2)
 
-- Runs on the AMD GPU; `--lazy_load true` peaks ~6.2GB GPU (loads/unloads the LLM then codec).
-- Generation is ~**RTF 1** plus a slow first-run kernel JIT — a full 4-min song takes a few
-  minutes; a 15s test ~5 min on a cold start. Output is 48kHz stereo.
+- Runs on the AMD GPU. With AOTriton-based memory efficient attention (`TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` enabled by default), generation runs at **~7.3 iterations/second** (saving ~50% compute time compared to baseline).
+- A 15-second song takes **~30 seconds** end-to-end. A 90-second song takes **~172 seconds (2.8 minutes)**.
+- Compiling the model via `-C` increases step generation rate to **~7.8 iterations/second**, but adds a ~20-second startup overhead. Only recommended for songs longer than 3 minutes.
 
 ## Notes / gotchas
 
