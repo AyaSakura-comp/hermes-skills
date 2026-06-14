@@ -15,7 +15,7 @@
 #   -T TEMP     Sampling temperature (default 1.0)
 #   -c CFG      Classifier-free guidance scale (default 1.5)
 #   -k TOPK     Top-k sampling (default 50)
-#   -Q LEVEL    Quality preset: high (default) = 320k mp3 + codec_steps 32;
+#   -Q LEVEL    Quality preset: high (default) = 320k mp3 + codec_steps 16;
 #               low = 128k mp3 + codec_steps 8 (faster, smaller — drafts).
 #   -q STEPS    Override HeartCodec decode steps (higher = better fidelity, slower).
 #               For max quality also use a lossless output ext (.flac/.wav) instead of .mp3.

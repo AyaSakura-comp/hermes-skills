@@ -49,7 +49,7 @@ Options:
 - `-c CFG` — guidance scale (default 1.5; higher = follow tags/lyrics more strictly).
 - `-k TOPK` — top-k sampling (default 50).
 - `-Q LEVEL` — **quality preset** (default `high`):
-  - `high` — 320kbps mp3 + codec_steps 32 (best fidelity).
+  - `high` — 320kbps mp3 + codec_steps 16 (best fidelity).
   - `low` — 128kbps mp3 + codec_steps 8 (faster, smaller — drafts/quick previews).
 - `-q STEPS` — override the preset's HeartCodec decode steps (higher = better fidelity, slower).
 
@@ -59,8 +59,8 @@ Options:
   the model's audio to a lossless wav then ffmpeg-encodes at the preset bitrate (avoids
   soundfile's low default mp3 bitrate and double-lossy).
 - For lossless, use `-o name.flac` or `-o name.wav` (bitrate preset is ignored for those).
-- `-q` overrides codec decode steps (reconstruction fidelity); `-Q high` already uses 32.
-- Codec runs in fp32 (best); bf16 would degrade quality.
+- `-q` overrides codec decode steps (reconstruction fidelity); `-Q high` already uses 16.
+- Codec runs in bfloat16 for a massive 4.25x speedup on ROCm with negligible quality difference.
 
 ### Clarity Repair (audio-separator post-processing, `-S`)
 
