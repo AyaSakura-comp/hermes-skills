@@ -46,7 +46,7 @@ done
 
 # Quality preset (default high). -q (codec steps) overrides the preset's step count.
 case "${QUALITY,,}" in
-  high) MP3_BR=320k; CSTEPS="${CSTEPS:-32}" ;;
+  high) MP3_BR=320k; CSTEPS="${CSTEPS:-16}" ;;
   low)  MP3_BR=128k; CSTEPS="${CSTEPS:-8}"  ;;
   *) echo "ERROR: -Q must be 'high' or 'low'"; exit 2 ;;
 esac
