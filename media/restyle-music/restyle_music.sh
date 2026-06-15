@@ -43,7 +43,7 @@ ACE_ENV=(env -u HSA_OVERRIDE_GFX_VERSION
 
 IN=""; STYLE=""; OUT="./restyled.mp3"; STRENGTH="0.6"; STEPS="8"
 LYRICS=""; LYRICS_INLINE=""; LANG="auto"; LM="acestep-5Hz-lm-0.6B"; BITRATE="256k"
-KEEP_VOCALS=0; VOCAL_GAIN="1.0"; AUTO_LYRICS=0; ASR_MODEL="gemma4:e2b"
+KEEP_VOCALS=0; VOCAL_GAIN="1.0"; AUTO_LYRICS=0; ASR_MODEL="${ASR_MODEL:-gemma4:e2b}"
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -28; exit 1; }
 

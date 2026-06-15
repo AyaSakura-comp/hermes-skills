@@ -71,6 +71,11 @@ delivery adopt the new genre. Trade-off: it's a **new singer's voice**, not your
 - Pair with `-g` for the vocal language and a lower `-S` (0.35–0.45) so the vocal moves further
   toward the new style. The transcribed lyrics are printed so you can sanity-check them.
 - Prefer your own clean lyrics? Skip `-A` and pass `-l`/`-L` directly (same effect, no ASR step).
+- **Accuracy caveat**: `gemma4:e2b` is a small model and transcribes a *full music mix*, so on
+  buried vocals or under-resourced languages (e.g. Taiwanese/台語) the lyrics can come out wrong
+  (it may even guess the wrong language). The transcription is printed — eyeball it. For better
+  results swap in a bigger model with `ASR_MODEL=gemma4:e4b` (or `26b`) before the call, or just
+  pass the real lyrics with `-l`/`-L`.
 
 ## Quick start (one-shot wrapper)
 
