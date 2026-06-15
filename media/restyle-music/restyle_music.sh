@@ -119,12 +119,15 @@ if [[ "$KEEP_VOCALS" == 1 ]]; then
 fi
 
 echo "[restyle] running ACE-Step cover on GPU (strength=$STRENGTH, steps=$STEPS) ..."
-RAW_OUT="$("${ACE_ENV[@]}" \
+COVER_LOG="$WORK/cover.log"
+"${ACE_ENV[@]}" \
   "$PY" "$SKILL_DIR/cover_runner.py" \
     --src "$COVER_SRC" --caption "$STYLE" --out-dir "$WORK/out" \
     --lyrics "$LYRICS_TEXT" --strength "$STRENGTH" --steps "$STEPS" \
     --language "$LANG" --lm "$LM" \
-  | tee /dev/stderr | sed -n 's/^RESULT_WAV=//p' | tail -1)"
+  >"$COVER_LOG" 2>&1 || true
+cat "$COVER_LOG"
+RAW_OUT="$(sed -n 's/^RESULT_WAV=//p' "$COVER_LOG" | tail -1)"
 
 [[ -n "$RAW_OUT" && -f "$RAW_OUT" ]] || { echo "ERROR: generation produced no audio"; exit 1; }
 
