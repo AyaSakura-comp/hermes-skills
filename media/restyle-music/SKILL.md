@@ -5,7 +5,7 @@ version: 1.0.0
 author: Hermes Agent
 license: MIT
 prerequisites:
-  commands: [ffmpeg, yt-dlp]
+  commands: [ffmpeg, yt-dlp, ollama]
   paths: [~/src/ACE-Step-1.5, ~/src/audio-separator]
 metadata:
   hermes:
@@ -49,6 +49,28 @@ original voice, pass `-k`: the skill splits the song into **vocals + instrumenta
 - Needs `~/src/audio-separator` (already deployed; set `AUDIO_SEPARATOR_DIR` to override).
 - Caveat: separation isn't perfect — faint bleed/reverb tails of the old backing can remain in
   the vocal stem. For a totally fresh (new) voice instead, run the normal mode without `-k`.
+
+## Make the VOCAL match the new style (`-A`, auto-lyrics)
+
+`-k` keeps the original voice unchanged, so the singing doesn't adopt the new genre. If instead
+you want the **vocal re-sung in the target style while keeping the original words**, use `-A`:
+the skill transcribes the source song's lyrics with **Ollama `gemma4:e2b`** (audio-capable),
+feeds those lyrics to ACE-Step, and runs a **normal cover** (it auto-drops `-k`). The melody/
+structure still follow the source (`-S`); the words come from the transcription; the timbre and
+delivery adopt the new genre. Trade-off: it's a **new singer's voice**, not your original one.
+
+```bash
+~/.claude/skills/restyle-music/restyle_music.sh \
+  -i "https://youtu.be/XXXX" -A \
+  -s "energetic Japanese rock band, distorted guitars, driving drums" \
+  -S 0.4 -g ja -o jrock.mp3
+```
+
+- `-A` auto-drops `-k` (can't both keep and re-sing the voice). Needs Ollama running with
+  `gemma4:e2b` pulled (`ollama pull gemma4:e2b`). It transcribes a 16kHz mono downmix internally.
+- Pair with `-g` for the vocal language and a lower `-S` (0.35–0.45) so the vocal moves further
+  toward the new style. The transcribed lyrics are printed so you can sanity-check them.
+- Prefer your own clean lyrics? Skip `-A` and pass `-l`/`-L` directly (same effect, no ASR step).
 
 ## Quick start (one-shot wrapper)
 
@@ -98,6 +120,8 @@ Options:
 - `-b RATE` — mp3 bitrate (default `256k`).
 - `-k`      — **keep the original singing voice** (separate → restyle instrumental → remix vocal). See above.
 - `-V GAIN` — vocal gain for `-k` remix (default `1.0`).
+- `-A`      — **auto-lyrics**: transcribe the source's lyrics via Ollama `gemma4:e2b` and re-sing
+  them in the new style (drops `-k`). See above. Pair with `-g` and a lower `-S`.
 
 The wrapper normalizes the input to 48kHz stereo wav, runs the cover on GPU, and encodes the result.
 It prints `[restyle] done -> <path>`.
@@ -116,6 +140,7 @@ the wrapper is fast (cover skips LM planning), so iterating on `-S` / the `-s` c
 | **Lost / mangled the original melody** | `-S` ↑ | Raise `-S`; higher = closer to the source structure. |
 | **Keep the ORIGINAL singing voice** | `-k` | Splits vocals out, restyles only the backing, remixes the real voice back. Use an instrumental `-s`. |
 | **A brand-new singer (don't keep the voice)** | *(omit `-k`)* | Normal cover re-synthesizes the vocal; pass `-l`/`-L` lyrics for clean diction. |
+| **The VOCAL to match the new genre, keeping the words** | `-A` | Auto-transcribes the lyrics (Ollama `gemma4:e2b`) and re-sings them in the new style; drops `-k`. Pair with `-g` + lower `-S`. |
 | **Kept vocal too quiet** (with `-k`) | `-V` ↑ | `-V 1.2`–`1.4`. |
 | **Kept vocal too loud / drowns the backing** (with `-k`) | `-V` ↓ | `-V 0.8`–`0.9`. |
 | **Garbled / mushy vocals** (without `-k`) | `-l` / `-L` | Supply the real lyrics (file or inline), or describe an instrumental style in `-s`. |
