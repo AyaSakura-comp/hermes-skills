@@ -44,7 +44,7 @@ Options:
 - `-L TEXT` — inline lyrics string (overrides `-l`).
 - `-o OUT` — output path. `.mp3` is auto-encoded at **320kbps** (generated lossless then ffmpeg);
   `.wav`/`.flac` = lossless. Default `./assets/output.mp3`.
-- `-d SEC` — max length in seconds. Default **240** (full ~4-min song). Use smaller for quick tests.
+- `-d SEC` — max length in seconds. Default **90** (1:30). Use larger for full songs.
 - `-T TEMP` — temperature (default 1.0; higher = more variation).
 - `-c CFG` — guidance scale (default 1.5; higher = follow tags/lyrics more strictly).
 - `-k TOPK` — top-k sampling (default 50).

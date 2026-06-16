@@ -11,7 +11,7 @@
 #   -l FILE     Lyrics file path (structured with [Intro]/[Verse]/[Chorus]/[Bridge] sections)
 #   -L TEXT     Inline lyrics string (use \n for line breaks). Overrides -l.
 #   -o OUT      Output audio path (.mp3/.wav/.flac). Default: ./assets/output.mp3
-#   -d SEC      Max song length in seconds. Default: 240 (full ~4min song)
+#   -d SEC      Max song length in seconds. Default: 90 (1:30)
 #   -T TEMP     Sampling temperature (default 1.0)
 #   -c CFG      Classifier-free guidance scale (default 1.5)
 #   -k TOPK     Top-k sampling (default 50)
@@ -24,6 +24,7 @@
 #               the cleaned stems back -> a subtle de-noise / de-mud pass. Keeps vocals.
 #   -C          Compile MuLa model using TorchDynamo for accelerated generation
 #               (recommended for long runs, e.g., > 3 minutes).
+#   -f SEC      Fade out duration in seconds at the end of the song (e.g., 5).
 #
 # Requires: heartlib deployed at this dir with .venv (torch 2.11+rocm7.2), ./ckpt models.
 # Notes: runs on GPU with --lazy_load (peaks ~6.2GB). Generation is ~RTF 1 (a 4min song ≈ a few min).
@@ -34,14 +35,14 @@ HERE="${HEARTLIB_DIR:-$HOME/src/heartlib}"
 PY="$HERE/.venv/bin/python"
 [ -x "$PY" ] || { echo "ERROR: heartlib venv not found at $HERE/.venv (set HEARTLIB_DIR)"; exit 1; }
 TAGS=""; LYRICS_FILE=""; LYRICS_TEXT=""; OUT="./assets/output.mp3"
-DUR=240; TEMP=1.0; CFG=1.5; TOPK=50; CSTEPS=""; QUALITY="high"; MP3_BR=""; CLARITY=0; COMPILE=0
+DUR=90; TEMP=1.0; CFG=1.5; TOPK=50; CSTEPS=""; QUALITY="high"; MP3_BR=""; CLARITY=0; COMPILE=0; FADE=0
 
-while getopts "t:l:L:o:d:T:c:k:q:Q:SC" opt; do
+while getopts "t:l:L:o:d:T:c:k:q:Q:SCf:" opt; do
   case "$opt" in
     t) TAGS="$OPTARG" ;; l) LYRICS_FILE="$OPTARG" ;; L) LYRICS_TEXT="$OPTARG" ;;
     o) OUT="$OPTARG" ;; d) DUR="$OPTARG" ;; T) TEMP="$OPTARG" ;;
     c) CFG="$OPTARG" ;; k) TOPK="$OPTARG" ;; q) CSTEPS="$OPTARG" ;;
-    Q) QUALITY="$OPTARG" ;; S) CLARITY=1 ;; C) COMPILE=1 ;;
+    Q) QUALITY="$OPTARG" ;; S) CLARITY=1 ;; C) COMPILE=1 ;; f) FADE="$OPTARG" ;;
     *) exit 2 ;;
   esac
 done
@@ -117,6 +118,28 @@ if [ "$CLARITY" = 1 ]; then
     fi
   else
     echo "[clarity] WARN: $CLARITY_SH not found/executable, skipping clarity repair"
+  fi
+fi
+
+# Optional fade out
+if [ "$FADE" -gt 0 ]; then
+  if ! command -v ffprobe >/dev/null 2>&1; then
+    echo "[fade] WARN: ffprobe not found, skipping fade out"
+  else
+    DURATION="$(ffprobe -i "$OUT" -show_entries format=duration -v quiet -of csv="p=0")"
+    if awk "BEGIN {exit !($DURATION > $FADE)}"; then
+      START_TIME="$(awk "BEGIN {print $DURATION - $FADE}")"
+      echo "[fade] applying ${FADE}s fade out starting at ${START_TIME}s..."
+      FTMP="$(mktemp "/tmp/cm_fade.XXXX.${OUT##*.}")"
+      case "${OUT,,}" in
+        *.mp3) ENC=(-b:a "$MP3_BR") ;;
+        *)     ENC=() ;;
+      esac
+      ffmpeg -y -i "$OUT" -filter_complex "afade=t=out:st=$START_TIME:d=$FADE" "${ENC[@]}" "$FTMP" >/dev/null 2>&1
+      mv -f "$FTMP" "$OUT"
+    else
+      echo "[fade] WARN: song duration ($DURATION) is shorter than fade duration ($FADE), skipping fade out"
+    fi
   fi
 fi
 

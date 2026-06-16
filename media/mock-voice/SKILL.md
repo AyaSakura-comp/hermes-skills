@@ -44,10 +44,10 @@ very loud music drowning the voice, see the optional demucs fallback at the bott
 ## Quick start (one-shot wrapper)
 
 The whole pipeline (download → trim → gemma4:e2b ref_text → OmniVoice GPU synth) is wrapped in
-`~/src/OmniVoice/mock_voice.sh`. For most requests, just run:
+`~/.claude/skills/mock-voice/mock_voice.sh`. For most requests, just run:
 
 ```bash
-~/src/OmniVoice/mock_voice.sh \
+~/.claude/skills/mock-voice/mock_voice.sh \
   -u "https://youtube.com/shorts/Ir3C_O7r3IA" \
   -t "今日はいい天気ですね、散歩に行きましょう。" \
   -l Japanese \
@@ -109,7 +109,7 @@ DUR=$(ffprobe -v quiet -show_entries format=duration \
 # Scan: try samples every 15s, pick the first one where gemma returns text
 for start in $(seq 0 15 $(int ${DUR%.*})); do
   ffmpeg -y -i ref.wav -ss "$start" -t 6 -ar 16000 -ac 1 -c:a pcm_s16le /tmp/ref_probe.wav 2>/dev/null
-  RT=$(.venv/bin/python "$HERE/ref_transcribe.py" /tmp/ref_probe.wav 2>/dev/null)
+  RT=$(~/src/OmniVoice/.venv/bin/python ~/.claude/skills/mock-voice/ref_transcribe.py /tmp/ref_probe.wav 2>/dev/null)
   if [ -n "$RT" ]; then
     echo "Found transcribable window at start=${start}s: $RT"
     # Copy this as the ref
@@ -135,7 +135,7 @@ OmniVoice wants a 3–10s reference of clear speech. The scan above picks 6–8s
 If Step 2 found a window with gemma output, `$RT` is already set. Otherwise verify:
 ```bash
 cd ~/src/OmniVoice
-RT=$(.venv/bin/python ref_transcribe.py asset_mock/ref_16k.wav)
+RT=$(~/src/OmniVoice/.venv/bin/python ~/.claude/skills/mock-voice/ref_transcribe.py asset_mock/ref_16k.wav)
 echo "ref_text: $RT"
 ```
 
@@ -154,7 +154,7 @@ PYTHONUTF8=1 .venv/bin/python -m omnivoice.cli.infer \
 
 Notes:
 - `--language` here is set automatically by the wrapper (see auto-detection below). When running
-  by hand, detect it: `LANG=$(.venv/bin/python detect_lang.py "<your text>")` then pass `--language "$LANG"`.
+  by hand, detect it: `LANG=$(~/src/OmniVoice/.venv/bin/python ~/.claude/skills/mock-voice/detect_lang.py "<your text>")` then pass `--language "$LANG"`.
   Omitting `--language` works but uses language-agnostic mode (slightly lower quality).
 - **Japanese takes natural kanji/kana directly** — no katakana conversion needed (unlike CosyVoice).
 - `--ref_text "$RT"` (from Step 3, gemma) skips OmniVoice's slow Whisper.
@@ -207,7 +207,7 @@ cp ~/src/OmniVoice/results_omni/mock.wav /tmp/mock_voice.wav
 
 ```bash
 # Agent detects language from text (Japanese kana/kanji -> ja); gemma4:e2b makes the ref_text; OmniVoice on GPU.
-~/src/OmniVoice/mock_voice.sh \
+~/.claude/skills/mock-voice/mock_voice.sh \
   -u "https://youtube.com/shorts/Ir3C_O7r3IA" \
   -t "こんにちは、私の声をクローンできましたか？テスト成功ですね。" \
   -l ja \
