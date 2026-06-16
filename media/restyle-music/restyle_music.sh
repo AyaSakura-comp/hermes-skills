@@ -142,7 +142,7 @@ if [[ "$KEEP_VOCALS" == 1 ]]; then
   echo "[restyle] -k: mixing vocals (gain=$VOCAL_GAIN) over instrumental (gain=$MUSIC_GAIN), loudness ${LOUDNESS} LUFS ..."
   FINAL="$WORK/mixed.wav"
   ffmpeg -y -loglevel error -i "$ORIG_VOCALS" -i "$RAW_OUT" -filter_complex \
-    "[0]aresample=48000,volume=${VOCAL_GAIN}[v];[1]aresample=48000,volume=${MUSIC_GAIN}[m];[v][m]amix=inputs=2:duration=longest:normalize=0[mix];[mix]loudnorm=I=${LOUDNESS}:TP=-1.0:LRA=11[a]" \
+    "[0]aresample=48000,volume=${VOCAL_GAIN}[v];[1]aresample=48000,volume=${MUSIC_GAIN}[m];[v][m]amix=inputs=2:duration=longest:normalize=0[mix];[mix]loudnorm=I=${LOUDNESS}:TP=-1.0:LRA=11,alimiter=limit=0.891:level=disabled[a]" \
     -map "[a]" -ac 2 -ar 48000 "$FINAL"
 fi
 
