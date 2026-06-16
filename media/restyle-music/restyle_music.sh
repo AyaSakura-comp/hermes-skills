@@ -13,7 +13,7 @@
 # keep the original voice we split the song into vocals + instrumental (audio-separator,
 # UVR-MDX-NET on GPU), restyle ONLY the instrumental, then mix the original vocals back on top:
 #   restyle_music.sh -i song.mp3 -s "lofi jazz, mellow Rhodes piano, brushed drums" -k -o lofi.mp3
-#   (-V VOCAL_GAIN to balance the original voice against the new backing, default 1.0)
+#   -k mix balance: -V vocal gain (1.0), -M music gain (1.25), -N loudness LUFS (-13).
 set -euo pipefail
 
 ACE_ROOT="${ACE_ROOT:-$HOME/src/ACE-Step-1.5}"
@@ -38,11 +38,11 @@ ACE_ENV=(env -u HSA_OVERRIDE_GFX_VERSION
 
 IN=""; STYLE=""; OUT="./restyled.mp3"; STRENGTH="0.6"; STEPS="8"
 LYRICS=""; LYRICS_INLINE=""; LANG="auto"; LM="acestep-5Hz-lm-0.6B"; BITRATE="256k"
-KEEP_VOCALS=0; VOCAL_GAIN="1.0"
+KEEP_VOCALS=0; VOCAL_GAIN="1.0"; MUSIC_GAIN="1.25"; LOUDNESS="-13"
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20; exit 1; }
 
-while getopts "i:s:o:S:q:l:L:g:m:b:kV:h" opt; do
+while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:h" opt; do
   case "$opt" in
     i) IN="$OPTARG" ;;
     s) STYLE="$OPTARG" ;;
@@ -56,6 +56,8 @@ while getopts "i:s:o:S:q:l:L:g:m:b:kV:h" opt; do
     b) BITRATE="$OPTARG" ;;
     k) KEEP_VOCALS=1 ;;
     V) VOCAL_GAIN="$OPTARG" ;;
+    M) MUSIC_GAIN="$OPTARG" ;;
+    N) LOUDNESS="$OPTARG" ;;
     h|*) usage ;;
   esac
 done
@@ -113,8 +115,9 @@ if [[ "$KEEP_VOCALS" == 1 ]]; then
   ORIG_VOCALS="$(ls "$WORK"/stems/*"(Vocals)"*.wav 2>/dev/null | head -1)"
   COVER_SRC="$(ls "$WORK"/stems/*"(Instrumental)"*.wav 2>/dev/null | head -1)"
   [[ -f "$ORIG_VOCALS" && -f "$COVER_SRC" ]] || { echo "ERROR: stem separation failed"; exit 1; }
-  # restyle the instrumental only -> don't feed lyrics (keeps the cover purely instrumental)
-  LYRICS_TEXT=""
+  # restyle the instrumental only -> force ACE's documented instrumental sentinel so the new
+  # backing has NO synthesized vocals (empty lyrics alone doesn't reliably suppress them).
+  LYRICS_TEXT="[Instrumental]"
   echo "[restyle] -k: original vocals preserved; restyling instrumental backing only."
 fi
 
@@ -131,13 +134,15 @@ RAW_OUT="$(sed -n 's/^RESULT_WAV=//p' "$COVER_LOG" | tail -1)"
 
 [[ -n "$RAW_OUT" && -f "$RAW_OUT" ]] || { echo "ERROR: generation produced no audio"; exit 1; }
 
-# --- keep-vocals: mix the original voice back over the restyled instrumental ----------------
+# --- keep-vocals: mix the original voice over the restyled instrumental ----------------------
+# Instrumental is boosted (MUSIC_GAIN) so the new backing/lead is forward, then the whole mix is
+# loudness-normalised (loudnorm to LOUDNESS LUFS, true-peak -1dB) so the result is loud & punchy.
 FINAL="$RAW_OUT"
 if [[ "$KEEP_VOCALS" == 1 ]]; then
-  echo "[restyle] -k: mixing original vocals (gain=$VOCAL_GAIN) over restyled instrumental ..."
+  echo "[restyle] -k: mixing vocals (gain=$VOCAL_GAIN) over instrumental (gain=$MUSIC_GAIN), loudness ${LOUDNESS} LUFS ..."
   FINAL="$WORK/mixed.wav"
-  ffmpeg -y -loglevel error -i "$ORIG_VOCALS" -i "$RAW_OUT" \
-    -filter_complex "[0]volume=${VOCAL_GAIN}[v];[v][1]amix=inputs=2:duration=longest:normalize=0[a]" \
+  ffmpeg -y -loglevel error -i "$ORIG_VOCALS" -i "$RAW_OUT" -filter_complex \
+    "[0]aresample=48000,volume=${VOCAL_GAIN}[v];[1]aresample=48000,volume=${MUSIC_GAIN}[m];[v][m]amix=inputs=2:duration=longest:normalize=0[mix];[mix]loudnorm=I=${LOUDNESS}:TP=-1.0:LRA=11[a]" \
     -map "[a]" -ac 2 -ar 48000 "$FINAL"
 fi
 

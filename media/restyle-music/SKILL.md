@@ -19,6 +19,56 @@ Take an **existing audio file** + a **target style description** and re-render t
 style while preserving the original melody/structure, via ACE-Step 1.5's `cover` task on the
 local AMD GPU (ROCm, gfx1151). Deployed at `~/src/ACE-Step-1.5`.
 
+## Caption format — how to write `-s` correctly
+
+**The `-s` caption MUST follow ACE-Step's official format.** Never just comma-separate tags.
+Write it as a **descriptive paragraph** using this four-part structure:
+
+```
+[1. Big genre label] + [2. Specific instruments/arrangement] + [3. Mood/atmosphere/scene] + [4. Exclusions]
+```
+
+This is based on the **official** `cover_wagaku.py` example from the ACE-Step repo:
+
+```
+Traditional Japanese wagaku arrangement (和樂). Replace all modern instruments with classical
+Japanese ones: plucked shamisen and koto, breathy shakuhachi bamboo flute, deep taiko drums,
+kotsuzumi hand drums, biwa, suzu bells and wind chimes. Pentatonic min'yo / gagaku folk feel,
+elegant and ceremonial, slower contemplative tempo, acoustic and organic, evoking a Japanese
+festival under cherry blossoms. No electric guitar, no synthesizer, no drum machine.
+```
+
+### Structure breakdown
+
+| Part | What to include | Example |
+|---|---|---|
+| **1. Genre label** | The big genre/style name | `Taiwan 8+9 komedya pop` |
+| **2. Instruments** | Name specific instruments/arrangement | `bright brass with trombone and trumpet, synth bass, gong and drum` |
+| **3. Mood/scene** | Describe the vibe/atmosphere | `festive party atmosphere reminiscent of Taiwanese wedding band` |
+| **4. Exclusions** | Explicit `No X, No Y` | `No acoustic instruments, no jazz elements` |
+
+### ✅ vs ❌ examples
+
+```bash
+# ❌ BAD — tag soup, comma-separated gibberish
+-s "lofi jazz, chill, mellow, piano, beats, instrumental"
+
+# ✅ GOOD — descriptive paragraph following official format
+-s "lofi jazz: mellow Rhodes electric piano over a relaxed hip-hop drum beat with brushed snare,
+upright bass walking the root notes, warm vinyl crackle texture, relaxed and contemplative mood
+for late-night study sessions. No heavy bass, no synth leads, no fast tempo."
+```
+
+> 💡 Write the `-s` caption like a **brief for a music producer** — a complete descriptive
+> paragraph, not a tag cloud.
+
+**Two hard rules:**
+- **Write the caption in English.** The model's text encoder is English-centric, so English gives
+  the most reliable results. A native-script genre name in parentheses is fine (the official
+  example uses `(和樂)`), but keep the instrument/mood description in English.
+- **Keep it under ~512 characters** (ACE-Step's caption limit; longer is silently truncated).
+  The official example above is ~330 chars — aim for that ballpark, not an essay.
+
 ## When to use
 
 - "Change this song into <genre>" / "make this traditional Japanese / lofi / orchestral / metal"
@@ -39,11 +89,14 @@ original voice, pass `-k`: the skill splits the song into **vocals + instrumenta
 ```bash
 ~/.claude/skills/restyle-music/restyle_music.sh \
   -i ./song.mp3 -k \
-  -s "lofi jazz, mellow Rhodes piano, brushed drums, upright bass, instrumental" \
+  -s "lofi jazz: mellow Rhodes electric piano over relaxed hip-hop drums with brushed snare and upright bass, warm and contemplative mood for late-night listening. No heavy bass, no synth leads." \
   -V 1.0 -o ./lofi_keepvocals.mp3
 ```
 
-- `-k` skips lyrics automatically (so the restyled backing stays instrumental).
+- `-k` skips lyrics automatically (so the restyled backing stays instrumental). When using `-k`, the `-s` caption should describe an **instrumental** style (no vocal descriptions).
+- The remix defaults are tuned to keep the **backing loud and the lead/melody prominent**: the
+  instrumental is boosted (`-M`, default `1.25`) and the whole mix is loudness-normalised to a
+  punchy `-13` LUFS (`-N`). Adjust the balance with `-V` (vocal) / `-M` (music) / `-N` (loudness).
 - `-V GAIN` balances the kept voice against the new backing (default `1.0`; `1.2`–`1.4` if the
   vocal sits too low, `0.8` if it's too hot). Describe an **instrumental** style in `-s`.
 - Needs `~/src/audio-separator` (already deployed; set `AUDIO_SEPARATOR_DIR` to override).
@@ -57,14 +110,14 @@ original voice, pass `-k`: the skill splits the song into **vocals + instrumenta
 ```bash
 ~/.claude/skills/restyle-music/restyle_music.sh \
   -i ./input_song.mp3 \
-  -s "traditional Japanese wagaku: shamisen, koto, shakuhachi, taiko, no electric instruments" \
+  -s "Traditional Japanese wagaku arrangement (和樂). Plucked shamisen and koto, breathy shakuhachi bamboo flute, deep taiko drums, elegant ceremonial feel with pentatonic min'yo folk atmosphere, slower contemplative tempo, acoustic and organic. No electric guitar, no synthesizer, no drum machine." \
   -o ./restyled.mp3
 ```
 
 With more control (looser style transfer + keep the vocal by supplying lyrics):
 ```bash
 ~/.claude/skills/restyle-music/restyle_music.sh \
-  -i song.wav -s "lofi jazz, mellow Rhodes piano, brushed drums, upright bass" \
+  -i song.wav -s "lofi jazz: mellow Rhodes electric piano over relaxed hip-hop drums with brushed snare and upright bass, warm and contemplative mood for late-night listening. No heavy bass, no synth leads." \
   -S 0.45 -l ./lyrics.txt -o lofi.mp3
 ```
 
@@ -76,7 +129,7 @@ first, then proceeds exactly as for a local file. No need to download by hand.
 ```bash
 ~/.claude/skills/restyle-music/restyle_music.sh \
   -i "https://youtu.be/XXXXXXXXXXX" -k \
-  -s "traditional Japanese wagaku: shamisen, koto, taiko, instrumental" \
+  -s "Traditional Japanese wagaku arrangement (和樂). Plucked shamisen and koto, breathy shakuhachi flute, deep taiko drums, elegant ceremonial pentatonic folk feel, acoustic and organic atmosphere. No electric instruments, no synthesizer, no drum machine." \
   -S 0.5 -o ./wagaku.mp3
 ```
 
@@ -86,8 +139,10 @@ then pass `-i song.wav`.)
 Options:
 - `-i FILE|URL` — **input audio**: a local file (any ffmpeg-readable: mp3/wav/flac/m4a…) **or** a
   YouTube/other URL (auto-downloaded via `yt-dlp`). Required.
-- `-s TEXT` — **target style** description (instruments, genre, mood, tempo). Required. Be
-  specific and say what to *remove* too (e.g. "no electric guitar, no synth").
+- `-s TEXT` — **target style description** (required). Must follow the official four-part
+  format: `[Genre label]. [Specific instruments/arrangement]. [Mood/atmosphere/scene]. No X, No Y.`
+  Write a complete descriptive paragraph **in English**, never just comma-separated tags, and keep
+  it **under ~512 chars** (longer is truncated). See **Caption format** section above for examples.
 - `-o OUT`  — output path. `.mp3` re-encoded (default `256k`); `.wav`/`.flac` = lossless. Default `./restyled.mp3`.
 - `-S NUM`  — `audio_cover_strength` 0.0–1.0 (default **0.6**). **Lower = freer / more style change**
   (0.3–0.5 for a strong genre swap); **higher = stays closer to the original** (0.7–0.9 for a light
@@ -99,7 +154,11 @@ Options:
 - `-m NAME` — LM checkpoint (default `acestep-5Hz-lm-0.6B`; cover skips the LM so this rarely matters).
 - `-b RATE` — mp3 bitrate (default `256k`).
 - `-k`      — **keep the original singing voice** (separate → restyle instrumental → remix vocal). See above.
-- `-V GAIN` — vocal gain for `-k` remix (default `1.0`).
+- `-V GAIN` — vocal gain for the `-k` remix (default `1.0`).
+- `-M GAIN` — **music/instrumental gain** for the `-k` remix (default `1.25`, so the new backing &
+  lead melody sit forward). Raise for a louder/more prominent backing, lower to favour the vocal.
+- `-N LUFS` — final loudness target for the `-k` mix (default `-13`, true-peak −1 dB; louder/punchier).
+  Less negative = louder (e.g. `-11`); more negative = quieter (e.g. `-16`).
 
 The wrapper normalizes the input to 48kHz stereo wav, runs the cover on GPU, and encodes the result.
 It prints `[restyle] done -> <path>`.
@@ -111,8 +170,9 @@ the wrapper is fast (cover skips LM planning), so iterating on `-S` / the `-s` c
 
 | If the user wants to… | Use | How |
 |---|---|---|
-| **Change the genre/instrumentation** | `-s "…"` | The core control. Name instruments, genre, mood, tempo. Be specific. |
-| **Remove a specific instrument** (e.g. drop the guitar/synth) | `-s "…"` | Say it explicitly: `"…, no electric guitar, no synth, no drums"`. |
+| **Change the genre/instrumentation** | `-s "…"` | The core control. Write a full descriptive paragraph: `[Genre]. [Instruments]. [Mood]. No X, No Y.` |
+| **Remove a specific instrument** (e.g. drop the guitar/synth) | `-s "…"` | End with `"No electric guitar, no synthesizer, no drum machine."` |
+| **Write a better caption** | — | Follow the official four-part format: genre → instruments → mood → exclusions. Never tag-soup. |
 | **More style change / "it still sounds like the original"** | `-S` ↓ | Lower it: `-S 0.4` (or 0.3) for a strong swap. |
 | **Less style change / "it drifted too far, keep the original feel"** | `-S` ↑ | Raise it: `-S 0.75`–`0.9` for a light re-skin. |
 | **Lost / mangled the original melody** | `-S` ↑ | Raise `-S`; higher = closer to the source structure. |
@@ -149,8 +209,9 @@ env -u HSA_OVERRIDE_GFX_VERSION \
   ACESTEP_LM_BACKEND=pt \
   ACESTEP_ROCM_DTYPE=float32 \
   ACE_ROOT=$PWD .venv/bin/python ~/.claude/skills/restyle-music/cover_runner.py \
-    --src /tmp/src.wav --caption "lofi jazz, mellow piano" --out-dir ./output/restyle \
-    --strength 0.6 --steps 8
+    --src /tmp/src.wav \
+    --caption "lofi jazz: mellow Rhodes electric piano over relaxed hip-hop drums, warm contemplative mood. No heavy bass, no synth leads." \
+    --out-dir ./output/restyle --strength 0.6 --steps 8
 ```
 
 The wrapper sets all of these for you (and for the `-k` separator step too), so a bare
