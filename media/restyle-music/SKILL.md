@@ -19,6 +19,26 @@ Take an **existing audio file** + a **target style description** and re-render t
 style while preserving the original melody/structure, via ACE-Step 1.5's `cover` task on the
 local AMD GPU (ROCm, gfx1151). Deployed at `~/src/ACE-Step-1.5`.
 
+## Building the `-s` caption — research the genre FIRST
+
+Users usually give a **short genre name** ("和樂器 band", "city pop", "phonk", "Hardstyle",
+"南管"), not a full description. **Do not write the caption from memory** — first look the genre
+up, then translate what you learn into the official caption format below.
+
+**Workflow (agent must follow):**
+1. **Take the user's requested style** (a genre name, an artist/band, a vibe).
+2. **Web-search it** — e.g. `"<genre> instruments musical style"` or `"<artist> band instruments
+   genre"` — to find its **defining instruments, typical arrangement, tempo/mood, and what it
+   deliberately avoids**. (This is exactly how the Wagakki Band request was handled: a search
+   revealed it fuses shamisen/koto/shakuhachi/taiko with a rock band, so the caption named both.)
+3. **Compose the `-s` caption** from those findings in the four-part format below — in English,
+   under ~512 chars.
+4. Run the wrapper with that caption.
+
+Skip the search only when the genre is already well-defined and you can name its real instruments
+confidently (e.g. "lofi jazz", "orchestral"). When in doubt, search — a caption built from a real
+instrument list beats a vague one every time.
+
 ## Caption format — how to write `-s` correctly
 
 **The `-s` caption MUST follow ACE-Step's official format.** Never just comma-separate tags.
