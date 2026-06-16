@@ -101,24 +101,30 @@ fi
 echo "[restyle] normalizing input -> 48kHz stereo wav ..."
 ffmpeg -y -loglevel error -i "$IN" -ac 2 -ar 48000 "$SRC_WAV"
 
-# --- keep-vocals: split off the original singing voice; restyle only the instrumental -------
+# --- keep-vocals: split off the original singing voice, then feed the VOCAL to ACE as the cover
+#     source so it GROWS a fresh new-genre backing that follows the sung melody (rather than
+#     restyling the old-genre instrumental). The original vocal is mixed back at the end. --------
+SEP="$SEP_DIR/.venv/bin/audio-separator"
+# separate <input_wav> <out_subdir>: writes (Vocals)/(Instrumental) stems into out_subdir.
+separate() {
+  "${ACE_ENV[@]}" "$SEP" "$1" \
+    --model_filename "UVR-MDX-NET-Inst_HQ_4.onnx" --model_file_dir "$SEP_DIR/models" \
+    --output_dir "$2" --output_format WAV \
+    --mdx_segment_size 512 --mdx_overlap 0.85 --log_level INFO 2>&1 \
+    | grep -aviE "MIOpen|IsEnoughWorkspace|UserWarning|warnings.warn|iB/s|it/s" | tail -4 || true
+}
+
 ORIG_VOCALS=""; COVER_SRC="$SRC_WAV"
 if [[ "$KEEP_VOCALS" == 1 ]]; then
-  SEP="$SEP_DIR/.venv/bin/audio-separator"
   [[ -x "$SEP" ]] || { echo "ERROR: -k needs audio-separator at $SEP_DIR/.venv (set AUDIO_SEPARATOR_DIR)"; exit 1; }
-  echo "[restyle] -k: separating vocals/instrumental on GPU (UVR-MDX-NET) ..."
-  "${ACE_ENV[@]}" "$SEP" "$SRC_WAV" \
-    --model_filename "UVR-MDX-NET-Inst_HQ_4.onnx" --model_file_dir "$SEP_DIR/models" \
-    --output_dir "$WORK/stems" --output_format WAV \
-    --mdx_segment_size 512 --mdx_overlap 0.85 --log_level INFO 2>&1 \
-    | grep -aviE "MIOpen|IsEnoughWorkspace|UserWarning|warnings.warn|iB/s|it/s" | tail -6
+  echo "[restyle] -k: separating vocals on GPU (UVR-MDX-NET) ..."
+  separate "$SRC_WAV" "$WORK/stems"
   ORIG_VOCALS="$(ls "$WORK"/stems/*"(Vocals)"*.wav 2>/dev/null | head -1)"
-  COVER_SRC="$(ls "$WORK"/stems/*"(Instrumental)"*.wav 2>/dev/null | head -1)"
-  [[ -f "$ORIG_VOCALS" && -f "$COVER_SRC" ]] || { echo "ERROR: stem separation failed"; exit 1; }
-  # restyle the instrumental only -> force ACE's documented instrumental sentinel so the new
-  # backing has NO synthesized vocals (empty lyrics alone doesn't reliably suppress them).
+  [[ -f "$ORIG_VOCALS" ]] || { echo "ERROR: vocal separation failed"; exit 1; }
+  # Feed the VOCAL as the cover source so ACE composes a new backing around the sung melody.
+  COVER_SRC="$ORIG_VOCALS"
   LYRICS_TEXT="[Instrumental]"
-  echo "[restyle] -k: original vocals preserved; restyling instrumental backing only."
+  echo "[restyle] -k: feeding the original vocal to ACE as the cover source (new backing follows the melody)."
 fi
 
 echo "[restyle] running ACE-Step cover on GPU (strength=$STRENGTH, steps=$STEPS) ..."
@@ -134,14 +140,17 @@ RAW_OUT="$(sed -n 's/^RESULT_WAV=//p' "$COVER_LOG" | tail -1)"
 
 [[ -n "$RAW_OUT" && -f "$RAW_OUT" ]] || { echo "ERROR: generation produced no audio"; exit 1; }
 
-# --- keep-vocals: mix the original voice over the restyled instrumental ----------------------
-# Instrumental is boosted (MUSIC_GAIN) so the new backing/lead is forward, then the whole mix is
-# loudness-normalised (loudnorm to LOUDNESS LUFS, true-peak -1dB) so the result is loud & punchy.
+# --- keep-vocals: strip any vocal ACE added to its new backing, then mix the ORIGINAL voice over
+#     it. Instrumental is boosted (MUSIC_GAIN) and the mix is loudness-normalised + peak-limited. -
 FINAL="$RAW_OUT"
 if [[ "$KEEP_VOCALS" == 1 ]]; then
-  echo "[restyle] -k: mixing vocals (gain=$VOCAL_GAIN) over instrumental (gain=$MUSIC_GAIN), loudness ${LOUDNESS} LUFS ..."
+  echo "[restyle] -k: separating the new backing to drop any vocal ACE generated ..."
+  separate "$RAW_OUT" "$WORK/newstems"
+  NEW_INST="$(ls "$WORK"/newstems/*"(Instrumental)"*.wav 2>/dev/null | head -1)"
+  [[ -f "$NEW_INST" ]] || { echo "ERROR: backing separation failed"; exit 1; }
+  echo "[restyle] -k: mixing original vocal (gain=$VOCAL_GAIN) over new backing (gain=$MUSIC_GAIN), loudness ${LOUDNESS} LUFS ..."
   FINAL="$WORK/mixed.wav"
-  ffmpeg -y -loglevel error -i "$ORIG_VOCALS" -i "$RAW_OUT" -filter_complex \
+  ffmpeg -y -loglevel error -i "$ORIG_VOCALS" -i "$NEW_INST" -filter_complex \
     "[0]aresample=48000,volume=${VOCAL_GAIN}[v];[1]aresample=48000,volume=${MUSIC_GAIN}[m];[v][m]amix=inputs=2:duration=longest:normalize=0[mix];[mix]loudnorm=I=${LOUDNESS}:TP=-1.0:LRA=11,alimiter=limit=0.891:level=disabled[a]" \
     -map "[a]" -ac 2 -ar 48000 "$FINAL"
 fi

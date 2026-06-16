@@ -102,9 +102,17 @@ generating a brand-new song from lyrics+tags use the `create-music` skill instea
 
 Cover mode **re-synthesizes the whole song, vocals included** — so on its own it cannot keep the
 real original voice (it renders a new singer over the kept melody). To genuinely preserve the
-original voice, pass `-k`: the skill splits the song into **vocals + instrumental** with
-`audio-separator` (UVR-MDX-NET, on the GPU), restyles **only the instrumental**, then mixes the
-**original vocal stem** back on top. Result = your original singer over a new-genre backing.
+original voice, pass `-k`. The `-k` pipeline:
+
+1. **Separate** the song into vocals + instrumental with `audio-separator` (UVR-MDX-NET, GPU).
+2. Feed the **isolated vocal** to ACE as the cover source (with `[Instrumental]`), so ACE
+   **composes a fresh new-genre backing that follows the sung melody** — rather than trying to
+   bend the old-genre instrumental into the new style (which sounded forced). 
+3. **Separate ACE's output** again to drop any vocal it generated, keeping the clean new backing.
+4. **Mix the original vocal stem** back over that backing (boosted + loudness-normalised).
+
+Result = your original singer over a freshly-composed new-genre backing that fits the melody.
+(Costs two separation passes; that's why `-k` is a bit slower, but the backing fits far better.)
 
 ```bash
 ~/.claude/skills/restyle-music/restyle_music.sh \
