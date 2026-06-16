@@ -14,11 +14,6 @@
 # UVR-MDX-NET on GPU), restyle ONLY the instrumental, then mix the original vocals back on top:
 #   restyle_music.sh -i song.mp3 -s "lofi jazz, mellow Rhodes piano, brushed drums" -k -o lofi.mp3
 #   (-V VOCAL_GAIN to balance the original voice against the new backing, default 1.0)
-#
-# Make the VOCAL match the new style (-A): re-sing instead of keeping the original voice.
-# -A transcribes the source's lyrics with Ollama gemma4:e2b, feeds them to ACE-Step, and runs
-# a normal cover (auto-drops -k) so the new vocal keeps the words but adopts the target genre:
-#   restyle_music.sh -i song.mp3 -s "energetic J-rock band" -A -S 0.4 -g ja -o jrock.mp3
 set -euo pipefail
 
 ACE_ROOT="${ACE_ROOT:-$HOME/src/ACE-Step-1.5}"
@@ -43,11 +38,11 @@ ACE_ENV=(env -u HSA_OVERRIDE_GFX_VERSION
 
 IN=""; STYLE=""; OUT="./restyled.mp3"; STRENGTH="0.6"; STEPS="8"
 LYRICS=""; LYRICS_INLINE=""; LANG="auto"; LM="acestep-5Hz-lm-0.6B"; BITRATE="256k"
-KEEP_VOCALS=0; VOCAL_GAIN="1.0"; AUTO_LYRICS=0; ASR_MODEL="${ASR_MODEL:-gemma4:e2b}"
+KEEP_VOCALS=0; VOCAL_GAIN="1.0"
 
-usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -28; exit 1; }
+usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20; exit 1; }
 
-while getopts "i:s:o:S:q:l:L:g:m:b:kV:Ah" opt; do
+while getopts "i:s:o:S:q:l:L:g:m:b:kV:h" opt; do
   case "$opt" in
     i) IN="$OPTARG" ;;
     s) STYLE="$OPTARG" ;;
@@ -61,7 +56,6 @@ while getopts "i:s:o:S:q:l:L:g:m:b:kV:Ah" opt; do
     b) BITRATE="$OPTARG" ;;
     k) KEEP_VOCALS=1 ;;
     V) VOCAL_GAIN="$OPTARG" ;;
-    A) AUTO_LYRICS=1 ;;
     h|*) usage ;;
   esac
 done
@@ -104,24 +98,6 @@ fi
 
 echo "[restyle] normalizing input -> 48kHz stereo wav ..."
 ffmpeg -y -loglevel error -i "$IN" -ac 2 -ar 48000 "$SRC_WAV"
-
-# --- auto-lyrics: transcribe the source song with Ollama Gemma e2b, then re-sing in the new
-#     style with those words (so the vocal MATCHES the genre). Implies NO -k. -----------------
-if [[ "$AUTO_LYRICS" == 1 ]]; then
-  if [[ "$KEEP_VOCALS" == 1 ]]; then
-    echo "[restyle] -A re-sings the vocal in the new style, so -k (keep original voice) is dropped."
-    KEEP_VOCALS=0
-  fi
-  curl -fsS "http://localhost:11434/api/tags" >/dev/null 2>&1 \
-    || { echo "ERROR: -A needs Ollama running at localhost:11434 (model $ASR_MODEL)"; exit 1; }
-  echo "[restyle] -A: transcribing lyrics from the source via Ollama $ASR_MODEL ..."
-  ASR_WAV="$WORK/forasr.wav"
-  ffmpeg -y -loglevel error -i "$SRC_WAV" -ac 1 -ar 16000 "$ASR_WAV"
-  LYRICS_TEXT="$("$PY" "$SKILL_DIR/transcribe_lyrics.py" "$ASR_WAV" "$ASR_MODEL")"
-  [[ -n "$LYRICS_TEXT" ]] || { echo "ERROR: auto-lyrics transcription returned empty"; exit 1; }
-  echo "[restyle] -A: transcribed lyrics ($(printf '%s' "$LYRICS_TEXT" | grep -c . ) lines):"
-  printf '%s\n' "$LYRICS_TEXT" | sed 's/^/    /'
-fi
 
 # --- keep-vocals: split off the original singing voice; restyle only the instrumental -------
 ORIG_VOCALS=""; COVER_SRC="$SRC_WAV"
