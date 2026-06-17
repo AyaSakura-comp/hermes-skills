@@ -68,6 +68,18 @@ done
 [[ -x "$PY"    ]] || { echo "ERROR: ACE-Step venv not found at $PY (ACE_ROOT=$ACE_ROOT)"; exit 1; }
 command -v ffmpeg >/dev/null || { echo "ERROR: ffmpeg required"; exit 1; }
 
+# --- validate inputs against ACE-Step's real constraints (acestep/constants.py + inference.py) ---
+# Caption is free text (Qwen3-Embedding encoder, no fixed tag list) but capped at 512 chars.
+if (( ${#STYLE} > 512 )); then
+  echo "ERROR: -s caption is ${#STYLE} chars; ACE-Step's limit is 512. Shorten it."; exit 1
+fi
+# Vocal language must be one of ACE-Step's VALID_LANGUAGES (else fall back to en).
+ACE_LANGS=" ar az bg bn ca cs da de el en es fa fi fr he hi hr ht hu id is it ja ko la lt ms ne nl no pa pl pt ro ru sa sk sr sv sw ta te th tl tr uk ur vi yue zh unknown "
+if [[ -n "$LANG" && "$LANG" != "auto" && "$ACE_LANGS" != *" $LANG "* ]]; then
+  echo "[restyle] WARN: -g '$LANG' is not in ACE VALID_LANGUAGES; falling back to 'en' (台語→ try 'zh' or 'yue')."
+  LANG="en"
+fi
+
 # -i may be a URL (YouTube etc.) — yt-dlp grabs the audio first. Otherwise it's a local file.
 IS_URL=0
 [[ "$IN" =~ ^https?:// ]] && IS_URL=1
@@ -113,6 +125,8 @@ if [[ -z "$BPM" && "$KEEP_VOCALS" == 1 ]]; then
   fi
 fi
 BPM_ARG="${BPM:-0}"; [[ "$BPM_ARG" =~ ^[0-9]+$ ]] || BPM_ARG=0
+# ACE-Step accepts BPM 30–300; clamp so we never pass an out-of-range value.
+if (( BPM_ARG > 0 )); then (( BPM_ARG < 30 )) && BPM_ARG=30; (( BPM_ARG > 300 )) && BPM_ARG=300; fi
 
 # --- keep-vocals: split off the original singing voice, then feed the VOCAL to ACE as the cover
 #     source so it GROWS a fresh new-genre backing that follows the sung melody (rather than

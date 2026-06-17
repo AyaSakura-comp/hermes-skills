@@ -89,6 +89,26 @@ for late-night study sessions. No heavy bass, no synth leads, no fast tempo."
 - **Keep it under ~512 characters** (ACE-Step's caption limit; longer is silently truncated).
   The official example above is ~330 chars — aim for that ballpark, not an essay.
 
+## ACE-Step constraints (the skill validates these)
+
+Stay within what ACE-Step actually supports — don't invent free-form values for the bounded
+fields. From `acestep/constants.py` + `inference.py`:
+
+- **Caption (`-s`)**: free text (Qwen3-Embedding encoder — there is **no fixed tag list**), but
+  **≤ 512 chars** (the skill errors if longer). Ground the instruments you name in ACE's
+  recognised families for reliable results: **woodwinds, brass, strings, keyboard, guitar, bass,
+  drums, percussion, synth, fx, vocals/backing_vocals**. Obscure/very specific instruments may be
+  hit-or-miss; describe them in those terms (e.g. "shamisen → plucked strings", "sax → woodwinds").
+- **Vocal language (`-g`)** must be one of ACE's `VALID_LANGUAGES`: `ar az bg bn ca cs da de el
+  en es fa fi fr he hi hr ht hu id is it ja ko la lt ms ne nl no pa pl pt ro ru sa sk sr sv sw ta
+  te th tl tr uk ur vi yue zh unknown`. (No 台語 token — use `zh` or `yue`.) The skill warns and
+  falls back to `en` for anything else.
+- **BPM (`-B`)**: 30–300 (auto-detected value is clamped to this).
+- **Lyrics (`-l`/`-L`)**: ≤ 4096 chars; `[Instrumental]` = no vocals.
+- **Duration**: 10–600 s; for cover it's locked to the source length.
+- Other metadata ACE accepts (not exposed as flags): keyscale (A–G + ♯/♭, major/minor),
+  time-signature ∈ {2,3,4,6}.
+
 ## When to use
 
 - "Change this song into <genre>" / "make this traditional Japanese / lofi / orchestral / metal"
