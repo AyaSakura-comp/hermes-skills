@@ -38,11 +38,11 @@ ACE_ENV=(env -u HSA_OVERRIDE_GFX_VERSION
 
 IN=""; STYLE=""; OUT="./restyled.mp3"; STRENGTH="0.5"; STEPS="8"
 LYRICS=""; LYRICS_INLINE=""; LANG="auto"; LM="acestep-5Hz-lm-0.6B"; BITRATE="256k"
-KEEP_VOCALS=0; VOCAL_GAIN="1.0"; MUSIC_GAIN="1.25"; LOUDNESS="-13"
+KEEP_VOCALS=0; VOCAL_GAIN="1.0"; MUSIC_GAIN="1.25"; LOUDNESS="-13"; BPM=""
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20; exit 1; }
 
-while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:h" opt; do
+while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:B:h" opt; do
   case "$opt" in
     i) IN="$OPTARG" ;;
     s) STYLE="$OPTARG" ;;
@@ -58,6 +58,7 @@ while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:h" opt; do
     V) VOCAL_GAIN="$OPTARG" ;;
     M) MUSIC_GAIN="$OPTARG" ;;
     N) LOUDNESS="$OPTARG" ;;
+    B) BPM="$OPTARG" ;;
     h|*) usage ;;
   esac
 done
@@ -101,6 +102,18 @@ fi
 echo "[restyle] normalizing input -> 48kHz stereo wav ..."
 ffmpeg -y -loglevel error -i "$IN" -ac 2 -ar 48000 "$SRC_WAV"
 
+# Lock the beat: detect the original song's tempo so ACE puts the new backing's beat grid on the
+# same pulse as the vocal (otherwise the generated drums can drift off the singing). -B overrides;
+# -B 0 disables. Auto-detect runs for -k (where the original vocal is overlaid on the new backing).
+if [[ -z "$BPM" && "$KEEP_VOCALS" == 1 ]]; then
+  SEP_PY="$SEP_DIR/.venv/bin/python"
+  if [[ -x "$SEP_PY" ]]; then
+    BPM="$("$SEP_PY" -c "import sys,librosa,numpy as np; y,sr=librosa.load(sys.argv[1],mono=True); t=librosa.beat.beat_track(y=y,sr=sr)[0]; print(int(round(float(np.atleast_1d(t)[0]))))" "$SRC_WAV" 2>/dev/null || true)"
+    [[ -n "$BPM" ]] && echo "[restyle] detected source tempo BPM=$BPM (locking the new backing's beat grid)"
+  fi
+fi
+BPM_ARG="${BPM:-0}"; [[ "$BPM_ARG" =~ ^[0-9]+$ ]] || BPM_ARG=0
+
 # --- keep-vocals: split off the original singing voice, then feed the VOCAL to ACE as the cover
 #     source so it GROWS a fresh new-genre backing that follows the sung melody (rather than
 #     restyling the old-genre instrumental). The original vocal is mixed back at the end. --------
@@ -133,7 +146,7 @@ COVER_LOG="$WORK/cover.log"
   "$PY" "$SKILL_DIR/cover_runner.py" \
     --src "$COVER_SRC" --caption "$STYLE" --out-dir "$WORK/out" \
     --lyrics "$LYRICS_TEXT" --strength "$STRENGTH" --steps "$STEPS" \
-    --language "$LANG" --lm "$LM" \
+    --language "$LANG" --lm "$LM" --bpm "$BPM_ARG" \
   >"$COVER_LOG" 2>&1 || true
 cat "$COVER_LOG"
 RAW_OUT="$(sed -n 's/^RESULT_WAV=//p' "$COVER_LOG" | tail -1)"

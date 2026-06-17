@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--steps", type=int, default=8, help="diffusion steps (turbo default 8)")
     ap.add_argument("--language", default="auto", help="vocal language hint, or 'auto'")
     ap.add_argument("--lm", default="acestep-5Hz-lm-0.6B", help="LM checkpoint name")
+    ap.add_argument("--bpm", type=int, default=0,
+                    help="explicit BPM to lock the tempo/beat grid (0 = let ACE auto-estimate)")
     ap.add_argument("--seed", type=int, default=-1)
     args = ap.parse_args()
 
@@ -66,7 +68,10 @@ def main():
         inference_steps=args.steps,
         guidance_scale=1.0,
         seed=args.seed,
+        bpm=(args.bpm if args.bpm and args.bpm > 0 else None),
     )
+    if args.bpm and args.bpm > 0:
+        logger.info(f"conditioning on explicit BPM={args.bpm} (beat-grid lock)")
     config = GenerationConfig(batch_size=1, audio_format="wav")
 
     t0 = time.time()

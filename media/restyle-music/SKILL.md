@@ -192,6 +192,11 @@ Options:
   lead melody sit forward). Raise for a louder/more prominent backing, lower to favour the vocal.
 - `-N LUFS` — final loudness target for the `-k` mix (default `-13`, true-peak −1 dB; louder/punchier).
   Less negative = louder (e.g. `-11`); more negative = quieter (e.g. `-16`).
+- `-B BPM` — lock the new backing's tempo to this BPM (conditions ACE's `bpm`). For `-k` the
+  original tempo is **auto-detected** (librosa, separator venv) and passed automatically so the
+  backing's beat grid matches the song; `-B N` overrides, `-B 0` disables (ACE auto-estimates).
+  Note: this locks *tempo*, not downbeat *phase* — if drums feel offset from the vocal groove,
+  tempo matching alone won't fix it.
 
 The wrapper normalizes the input to 48kHz stereo wav, runs the cover on GPU, and encodes the result.
 It prints `[restyle] done -> <path>`.
