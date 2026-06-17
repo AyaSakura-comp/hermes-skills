@@ -172,9 +172,14 @@ Options:
   Write a complete descriptive paragraph **in English**, never just comma-separated tags, and keep
   it **under ~512 chars** (longer is truncated). See **Caption format** section above for examples.
 - `-o OUT`  — output path. `.mp3` re-encoded (default `256k`); `.wav`/`.flac` = lossless. Default `./restyled.mp3`.
-- `-S NUM`  — `audio_cover_strength` 0.0–1.0 (default **0.6**). **Lower = freer / more style change**
-  (0.3–0.5 for a strong genre swap); **higher = stays closer to the original** (0.7–0.9 for a light
-  re-skin). This is the main knob to tune.
+- `-S NUM`  — `audio_cover_strength` 0.0–1.0 (default **0.5**). **Lower = freer / more style change**;
+  **higher = stays closer to the source**. Guidance:
+  - **Plain cover** (no `-k`, restyling the whole mix): ACE-Step officially recommends **~0.2 for
+    style transfer**. Going higher (0.4–0.6) keeps it too close to the original and can produce
+    *forced/weird instruments*. Use 0.2–0.3 for a clean genre swap.
+  - **`-k` (vocal-as-source)**: the source is just the vocal, so **~0.5** works well — enough
+    freedom to compose a new-genre backing while still following the sung melody. Lower if the
+    backing drifts off the melody; this is the main knob to tune.
 - `-l FILE` / `-L "inline"` — lyrics (file or inline, `\n` = line break). Optional; supplying the
   song's lyrics helps keep clean vocals on vocal tracks. Omit for instrumental-ish sources.
 - `-g LANG` — vocal language hint (`en`,`zh`,`ja`,…; default `auto`→en).
@@ -201,7 +206,8 @@ the wrapper is fast (cover skips LM planning), so iterating on `-S` / the `-s` c
 | **Change the genre/instrumentation** | `-s "…"` | The core control. Write a full descriptive paragraph: `[Genre]. [Instruments]. [Mood]. No X, No Y.` |
 | **Remove a specific instrument** (e.g. drop the guitar/synth) | `-s "…"` | End with `"No electric guitar, no synthesizer, no drum machine."` |
 | **Write a better caption** | — | Follow the official four-part format: genre → instruments → mood → exclusions. Never tag-soup. |
-| **More style change / "it still sounds like the original"** | `-S` ↓ | Lower it: `-S 0.4` (or 0.3) for a strong swap. |
+| **More style change / "it still sounds like the original"** | `-S` ↓ | Lower it. Plain cover: down to **0.2** (ACE's style-transfer sweet spot); `-k`: ~0.4. |
+| **Instruments sound forced / weird** | `-S` ↓ | Too high keeps it glued to the source — lower toward 0.2 (plain cover) for a cleaner render. |
 | **Less style change / "it drifted too far, keep the original feel"** | `-S` ↑ | Raise it: `-S 0.75`–`0.9` for a light re-skin. |
 | **Lost / mangled the original melody** | `-S` ↑ | Raise `-S`; higher = closer to the source structure. |
 | **Keep the ORIGINAL singing voice** | `-k` | Splits vocals out, restyles only the backing, remixes the real voice back. Use an instrumental `-s`. |
