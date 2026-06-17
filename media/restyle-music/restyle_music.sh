@@ -38,11 +38,11 @@ ACE_ENV=(env -u HSA_OVERRIDE_GFX_VERSION
 
 IN=""; STYLE=""; OUT="./restyled.mp3"; STRENGTH="0.5"; STEPS="8"
 LYRICS=""; LYRICS_INLINE=""; LANG="auto"; LM="acestep-5Hz-lm-0.6B"; BITRATE="256k"
-KEEP_VOCALS=0; VOCAL_GAIN="1.0"; MUSIC_GAIN="1.25"; LOUDNESS="-13"; BPM=""
+KEEP_VOCALS=0; VOCAL_GAIN="1.0"; MUSIC_GAIN="1.25"; LOUDNESS="-13"; BPM=""; KEYSCALE=""
 
 usage() { grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -20; exit 1; }
 
-while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:B:h" opt; do
+while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:B:K:h" opt; do
   case "$opt" in
     i) IN="$OPTARG" ;;
     s) STYLE="$OPTARG" ;;
@@ -59,6 +59,7 @@ while getopts "i:s:o:S:q:l:L:g:m:b:kV:M:N:B:h" opt; do
     M) MUSIC_GAIN="$OPTARG" ;;
     N) LOUDNESS="$OPTARG" ;;
     B) BPM="$OPTARG" ;;
+    K) KEYSCALE="$OPTARG" ;;
     h|*) usage ;;
   esac
 done
@@ -114,14 +115,17 @@ fi
 echo "[restyle] normalizing input -> 48kHz stereo wav ..."
 ffmpeg -y -loglevel error -i "$IN" -ac 2 -ar 48000 "$SRC_WAV"
 
-# Lock the beat: detect the original song's tempo so ACE puts the new backing's beat grid on the
-# same pulse as the vocal (otherwise the generated drums can drift off the singing). -B overrides;
-# -B 0 disables. Auto-detect runs for -k (where the original vocal is overlaid on the new backing).
-if [[ -z "$BPM" && "$KEEP_VOCALS" == 1 ]]; then
+# Lock tempo + key: detect the original song's BPM and musical key so ACE puts the new backing on
+# the same pulse AND in the same key as the vocal (otherwise the drums drift off-beat and the
+# harmony clashes with the singing). -B/-K override; -B 0 disables BPM. Auto-detect runs for -k.
+if [[ "$KEEP_VOCALS" == 1 && ( -z "$BPM" || -z "$KEYSCALE" ) ]]; then
   SEP_PY="$SEP_DIR/.venv/bin/python"
   if [[ -x "$SEP_PY" ]]; then
-    BPM="$("$SEP_PY" -c "import sys,librosa,numpy as np; y,sr=librosa.load(sys.argv[1],mono=True); t=librosa.beat.beat_track(y=y,sr=sr)[0]; print(int(round(float(np.atleast_1d(t)[0]))))" "$SRC_WAV" 2>/dev/null || true)"
-    [[ -n "$BPM" ]] && echo "[restyle] detected source tempo BPM=$BPM (locking the new backing's beat grid)"
+    META="$("$SEP_PY" "$SKILL_DIR/detect_meta.py" "$SRC_WAV" 2>/dev/null || true)"
+    DET_BPM="${META%%|*}"; DET_KEY="${META#*|}"
+    [[ -z "$BPM" && "$DET_BPM" =~ ^[0-9]+$ ]] && BPM="$DET_BPM"
+    [[ -z "$KEYSCALE" && -n "$DET_KEY" && "$DET_KEY" != "$META" ]] && KEYSCALE="$DET_KEY"
+    echo "[restyle] detected source: BPM=${BPM:-?} key='${KEYSCALE:-?}' (locking the backing's beat + harmony)"
   fi
 fi
 BPM_ARG="${BPM:-0}"; [[ "$BPM_ARG" =~ ^[0-9]+$ ]] || BPM_ARG=0
@@ -160,7 +164,7 @@ COVER_LOG="$WORK/cover.log"
   "$PY" "$SKILL_DIR/cover_runner.py" \
     --src "$COVER_SRC" --caption "$STYLE" --out-dir "$WORK/out" \
     --lyrics "$LYRICS_TEXT" --strength "$STRENGTH" --steps "$STEPS" \
-    --language "$LANG" --lm "$LM" --bpm "$BPM_ARG" \
+    --language "$LANG" --lm "$LM" --bpm "$BPM_ARG" --keyscale "$KEYSCALE" \
   >"$COVER_LOG" 2>&1 || true
 cat "$COVER_LOG"
 RAW_OUT="$(sed -n 's/^RESULT_WAV=//p' "$COVER_LOG" | tail -1)"
