@@ -136,6 +136,7 @@ if (( BPM_ARG > 0 )); then (( BPM_ARG < 30 )) && BPM_ARG=30; (( BPM_ARG > 300 ))
 #     source so it GROWS a fresh new-genre backing that follows the sung melody (rather than
 #     restyling the old-genre instrumental). The original vocal is mixed back at the end. --------
 SEP="$SEP_DIR/.venv/bin/audio-separator"
+SEP_PY="$SEP_DIR/.venv/bin/python"
 # separate <input_wav> <out_subdir>: writes (Vocals)/(Instrumental) stems into out_subdir.
 separate() {
   "${ACE_ENV[@]}" "$SEP" "$1" \
@@ -151,6 +152,7 @@ if [[ "$KEEP_VOCALS" == 1 ]]; then
   echo "[restyle] -k: separating vocals on GPU (UVR-MDX-NET) ..."
   separate "$SRC_WAV" "$WORK/stems"
   ORIG_VOCALS="$(ls "$WORK"/stems/*"(Vocals)"*.wav 2>/dev/null | head -1)"
+  ORIG_INST="$(ls "$WORK"/stems/*"(Instrumental)"*.wav 2>/dev/null | head -1)"  # beat reference
   [[ -f "$ORIG_VOCALS" ]] || { echo "ERROR: vocal separation failed"; exit 1; }
   # Feed the VOCAL as the cover source so ACE composes a new backing around the sung melody.
   COVER_SRC="$ORIG_VOCALS"
@@ -179,10 +181,28 @@ if [[ "$KEEP_VOCALS" == 1 ]]; then
   separate "$RAW_OUT" "$WORK/newstems"
   NEW_INST="$(ls "$WORK"/newstems/*"(Instrumental)"*.wav 2>/dev/null | head -1)"
   [[ -f "$NEW_INST" ]] || { echo "ERROR: backing separation failed"; exit 1; }
+
+  # Phase-align: the new backing can land a fraction of a beat off the vocal's groove. Using the
+  # original instrumental (which is aligned to the vocal) as a reference, detect the sub-beat
+  # offset and shift the new backing onto the vocal's beat grid before mixing.
+  if [[ -f "${ORIG_INST:-}" && -x "$SEP_PY" ]]; then
+    OFF="$("$SEP_PY" "$SKILL_DIR/beat_offset.py" "$ORIG_INST" "$NEW_INST" 2>/dev/null || echo 0)"
+    if python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1]))>=0.02 else 1)" "$OFF" 2>/dev/null; then
+      MS="$(python3 -c "import sys;print(int(round(abs(float(sys.argv[1]))*1000)))" "$OFF")"
+      if python3 -c "import sys; sys.exit(0 if float(sys.argv[1])>=0 else 1)" "$OFF"; then
+        ffmpeg -y -loglevel error -i "$NEW_INST" -af "adelay=${MS}|${MS}" "$WORK/aligned_inst.wav"
+      else
+        ffmpeg -y -loglevel error -i "$NEW_INST" -af "atrim=start=$(python3 -c "import sys;print(abs(float(sys.argv[1])))" "$OFF"),asetpts=PTS-STARTPTS" "$WORK/aligned_inst.wav"
+      fi
+      NEW_INST="$WORK/aligned_inst.wav"
+      echo "[restyle] -k: phase-aligned the backing by ${OFF}s onto the vocal's beat grid."
+    fi
+  fi
+
   echo "[restyle] -k: mixing original vocal (gain=$VOCAL_GAIN) over new backing (gain=$MUSIC_GAIN), loudness ${LOUDNESS} LUFS ..."
   FINAL="$WORK/mixed.wav"
   ffmpeg -y -loglevel error -i "$ORIG_VOCALS" -i "$NEW_INST" -filter_complex \
-    "[0]aresample=48000,volume=${VOCAL_GAIN}[v];[1]aresample=48000,volume=${MUSIC_GAIN}[m];[v][m]amix=inputs=2:duration=longest:normalize=0[mix];[mix]loudnorm=I=${LOUDNESS}:TP=-1.0:LRA=11,alimiter=limit=0.891:level=disabled[a]" \
+    "[0]aresample=48000,volume=${VOCAL_GAIN}[v];[1]aresample=48000,volume=${MUSIC_GAIN}[m];[v][m]amix=inputs=2:duration=first:normalize=0[mix];[mix]loudnorm=I=${LOUDNESS}:TP=-1.0:LRA=11,alimiter=limit=0.891:level=disabled[a]" \
     -map "[a]" -ac 2 -ar 48000 "$FINAL"
 fi
 
