@@ -188,5 +188,12 @@ export MIOPEN_CUSTOM_CACHE_DIR="$MIOPEN_USER_DB_PATH"
 mkdir -p "$MIOPEN_USER_DB_PATH"
 
 cd "$LTX_DIR"
-"${CMD[@]}"
+# Opt-in profiling: set LTX_ROCPROF_DIR to wrap the run in rocprofv3 (kernel trace +
+# per-kernel stats). Adds overhead, so use a separate run, not for clean timings.
+if [[ -n "${LTX_ROCPROF_DIR:-}" ]]; then
+  mkdir -p "$LTX_ROCPROF_DIR"
+  rocprofv3 --kernel-trace --stats --truncate-kernels -d "$LTX_ROCPROF_DIR" -- "${CMD[@]}"
+else
+  "${CMD[@]}"
+fi
 echo ">> done: $OUTPUT"
