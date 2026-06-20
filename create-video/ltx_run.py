@@ -99,6 +99,30 @@ def _contig_pytorch_attention(self, q, k, v, heads, mask=None):
 if os.environ.get("LTX_NO_CONTIG") != "1":
     _attn.PytorchAttention.__call__ = _contig_pytorch_attention
 
+# --- Triton bf16 linear for the heavy FFN GEMMs (gfx1151, HANDOFF §11e) ---
+# After the attention fix the DiT bottleneck is the FFN GEMMs; rocBLAS's
+# 128x128x32 Tensile kernel runs at ~12.5% occupancy. A 64x64x64 num_stages=1
+# Triton kernel (VGPR 168 -> ~30% occupancy) is +33% on ffn_down, +3% on ffn_up,
+# bit-exact. The fp8-cast Linears upcast fp8->bf16 then call F.linear, so we patch
+# that bf16 matmul. Only validated (K,N) shapes are routed; all else falls back to
+# F.linear. Gate off with LTX_NO_TRITON_GEMM=1.
+if os.environ.get("LTX_NO_TRITON_GEMM") != "1":
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from triton_linear import triton_linear as _triton_linear  # noqa: E402
+    from ltx_core.quantization import fp8_cast as _fp8
+
+    def _fp8_forward_triton(self, input):  # noqa: A002
+        w_up = _fp8._upcast_and_round(self.weight, input.dtype, self._with_stochastic_rounding, self._seed)
+        b_up = (
+            _fp8._upcast_and_round(self.bias, input.dtype, self._with_stochastic_rounding, self._seed)
+            if self.bias is not None
+            else None
+        )
+        return _triton_linear(input, w_up, b_up)
+
+    _fp8.Fp8CastLinear.forward = _fp8_forward_triton
+
 # --- optional: skip audio entirely ---
 if os.environ.get("LTX_NO_AUDIO") == "1":
     _orig_call = D.DistilledPipeline.__call__
