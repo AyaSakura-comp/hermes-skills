@@ -77,9 +77,16 @@ _blocks.DiffusionStage._transformer_ctx = _resident_transformer_ctx
 # ~0.22s/call (~10x), and is bit-exact (verified RMSE=0 over multiple seeds). Costs
 # ~39ms of copy kernels per call — a clear win for 3s+/1080p (attention-bound) clips.
 def _contig_pytorch_attention(self, q, k, v, heads, mask=None):
-    b, _, dim_head = q.shape
-    dim_head //= heads
-    q, k, v = (t.view(b, -1, heads, dim_head).transpose(1, 2).contiguous() for t in (q, k, v))
+    if q.ndim == 4:
+        # Optional head-major q/k path: preattention already produced contiguous-ish
+        # [B,H,S,D] tensors after RoPE, avoiding the extra q/k transpose+contiguous
+        # copies here. v still comes from the value projection as [B,S,H*D].
+        b, h, _, dim_head = q.shape
+        v = v.view(b, -1, heads, dim_head).transpose(1, 2).contiguous()
+    else:
+        b, _, dim_head = q.shape
+        dim_head //= heads
+        q, k, v = (t.view(b, -1, heads, dim_head).transpose(1, 2).contiguous() for t in (q, k, v))
 
     if mask is not None:
         if mask.ndim == 2:
@@ -95,9 +102,59 @@ def _contig_pytorch_attention(self, q, k, v, heads, mask=None):
     return out
 
 
+def _head_major_preattention(self, q, k, attn_module, mask, pe, k_pe):
+    # Dead-end experiment kept only for reproducibility (LTX_QK_HEAD_MAJOR=1): it
+    # removes q/k copy kernels but feeds AOTriton a bad non-contiguous stride and
+    # makes full 1080p attention ~3.3x slower. Do not enable for production runs.
+    q = attn_module.q_norm(q)
+    k = attn_module.k_norm(k)
+    if pe is not None:
+        from ltx_core.model.transformer.rope import apply_rotary_emb
+        b, _, inner = q.shape
+        dim_head = inner // attn_module.heads
+        q = q.unflatten(-1, (attn_module.heads, dim_head)).transpose(1, 2)
+        k = k.unflatten(-1, (attn_module.heads, dim_head)).transpose(1, 2)
+        q = apply_rotary_emb(q, pe, attn_module.rope_type)
+        k = apply_rotary_emb(k, pe if k_pe is None else k_pe, attn_module.rope_type)
+    return q, k
+
+
+def _triton_rope_preattention(self, q, k, attn_module, mask, pe, k_pe):
+    q = attn_module.q_norm(q)
+    k = attn_module.k_norm(k)
+    if pe is None:
+        return q, k
+
+    from ltx_core.model.transformer.rope import LTXRopeType, apply_rotary_emb
+    if attn_module.rope_type != LTXRopeType.SPLIT or q.dtype is not torch.bfloat16 or not q.is_cuda:
+        q = apply_rotary_emb(q, pe, attn_module.rope_type)
+        k = apply_rotary_emb(k, pe if k_pe is None else k_pe, attn_module.rope_type)
+        return q, k
+
+    try:
+        q = _fused_split_rope_to_contiguous(q, pe[0], pe[1], attn_module.heads)
+        k_freqs = pe if k_pe is None else k_pe
+        k = _fused_split_rope_to_contiguous(k, k_freqs[0], k_freqs[1], attn_module.heads)
+        return q, k
+    except Exception:
+        # Shape/dtype guardrail: if an odd attention block appears, preserve correctness.
+        q = apply_rotary_emb(q, pe, attn_module.rope_type)
+        k = apply_rotary_emb(k, pe if k_pe is None else k_pe, attn_module.rope_type)
+        return q, k
+
+
 # Gate with LTX_NO_CONTIG=1 to A/B against the original head-interleaved layout.
 if os.environ.get("LTX_NO_CONTIG") != "1":
     _attn.PytorchAttention.__call__ = _contig_pytorch_attention
+    if os.environ.get("LTX_QK_HEAD_MAJOR") == "1":
+        from ltx_core.model.transformer import ops as _ops
+        _ops.PytorchPreAttention.__call__ = _head_major_preattention
+    elif os.environ.get("LTX_TRITON_ROPE") == "1":
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from triton_rope import fused_split_rope_to_contiguous as _fused_split_rope_to_contiguous  # noqa: E402
+        from ltx_core.model.transformer import ops as _ops
+        _ops.PytorchPreAttention.__call__ = _triton_rope_preattention
 
 # --- Triton bf16 linear for the heavy FFN GEMMs (gfx1151, HANDOFF §11e) ---
 # After the attention fix the DiT bottleneck is the FFN GEMMs; rocBLAS's
