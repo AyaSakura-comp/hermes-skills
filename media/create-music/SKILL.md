@@ -111,7 +111,26 @@ It is not always easy, not always bright
 Supported sections: `[Intro] [Verse] [Prechorus] [Chorus] [Bridge] [Outro]` (multilingual lyrics
 are supported — HeartMuLa covers most languages).
 
-## Genre / tags ideas
+## ⚠️ MANDATORY: Search online BEFORE generating tags
+
+**NEVER write tags from memory or guess.** When the user specifies a genre, artist, song, or style:
+
+1. **Search the web** — e.g. `"<artist> instruments tempo BPM"` or `"<genre> musical style characteristics"`
+2. **Find real data** — BPM, specific instruments, arrangement style, vocal type, tempo
+3. **Write tags from actual findings** — not from guessing or generic assumptions
+4. **If no search results found**, tell the user and ask for clarification
+
+**Examples of things you MUST search:**
+- Artist-specific requests: "like Only My Railgun" → search for fripSide's actual instruments, BPM (130-143), synth+rock fusion
+- Genre requests: "京韵大鼓" → search for real instruments (大三弦、四胡、琵琶), ban shuo ban chang style
+- Song references: "like <song title>" → search the actual song's musical characteristics
+
+**What NOT to do:**
+- ❌ Write tags like "rock, energetic, guitar" for only my railgun (too vague, wrong BPM)
+- ❌ Write "Beijing opera, guqin" for 京韵大鼓 (wrong instruments entirely)
+- ❌ Guess what a genre sounds like without checking
+
+### Genre / tags ideas (for reference only — still search first)
 
 Comma-separated descriptors of instrument, mood, genre, tempo, vocals. Examples:
 - `piano, happy, upbeat`

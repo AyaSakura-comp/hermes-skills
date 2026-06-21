@@ -19,25 +19,27 @@ Take an **existing audio file** + a **target style description** and re-render t
 style while preserving the original melody/structure, via ACE-Step 1.5's `cover` task on the
 local AMD GPU (ROCm, gfx1151). Deployed at `~/src/ACE-Step-1.5`.
 
-## Building the `-s` caption — research the genre FIRST
+## ⚠️ MANDATORY: Web search FIRST — NEVER guess
 
-Users usually give a **short genre name** ("和樂器 band", "city pop", "phonk", "Hardstyle",
-"南管"), not a full description. **Do not write the caption from memory** — first look the genre
-up, then translate what you learn into the official caption format below.
+**This skill REQUIRES searching the web before writing ANY caption. No exceptions.**
 
-**Workflow (agent must follow):**
-1. **Take the user's requested style** (a genre name, an artist/band, a vibe).
+**Mandatory workflow (agent MUST follow each step):**
+1. **Take the user's requested style** (genre name, artist, band, song reference, or vibe).
 2. **Web-search it** — e.g. `"<genre> instruments musical style"` or `"<artist> band instruments
-   genre"` — to find its **defining instruments, typical arrangement, tempo/mood, and what it
-   deliberately avoids**. (This is exactly how the Wagakki Band request was handled: a search
-   revealed it fuses shamisen/koto/shakuhachi/taiko with a rock band, so the caption named both.)
-3. **Compose the `-s` caption** from those findings in the four-part format below — in English,
-   under ~512 chars.
-4. Run the wrapper with that caption.
+   genre"` or `"<song title> BPM arrangement"`. **You MUST find real data.**
+3. **Collect facts** — specific instruments, BPM/tempo, vocal type, arrangement style, what it avoids.
+   (Example: Wagakki Band search revealed shamisen/koto/shakuhachi/taiko + rock band.)
+4. **Compose the `-s` caption** from those ACTUAL findings — not from memory or guessing.
+5. **Run the wrapper** with the researched caption.
 
-Skip the search only when the genre is already well-defined and you can name its real instruments
-confidently (e.g. "lofi jazz", "orchestral"). When in doubt, search — a caption built from a real
-instrument list beats a vague one every time.
+**What happens if you skip the search:**
+- You will write wrong instruments (e.g. "guqin" instead of "大三弦" for 京韵大鼓)
+- You will get wrong tempo (e.g. "170 BPM" instead of "130 BPM" for only my railgun)
+- The output will sound "wrong" and users will call you out on it
+- **This skill has been broken by this exact mistake multiple times**
+
+**Skip the search ONLY when:** genre is extremely generic with no specific references (e.g. "lofi", "orchestral").
+When in doubt, ALWAYS search.
 
 ## Caption format — how to write `-s` correctly
 
