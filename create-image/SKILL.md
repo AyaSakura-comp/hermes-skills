@@ -20,7 +20,8 @@ python ~/.hermes/skills/create-image/scripts/create_image.py "YOUR PROMPT HERE"
 ```
 
 That prints a JSON object — take the `final_path` field and **you MUST attach that PNG file in your
-reply to the user** (don't just report the path or say "done"; always send the actual image).
+reply to the user** (on Discord, include `[[image: /path/to/file.png]]` in your reply so it sends as a real
+attachment). Never just report the path or describe the image in text without attaching the actual file.
 
 Pick the mode by what the user asked for:
 
@@ -277,6 +278,18 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
 - Works with text2img and `--image` (photo → PVC figure). ~70 s at 720p→1080p.
 - File location: `ComfyUI/models/diffusion_models/PVCStyleModelMovable_anima10.safetensors`.
 
+### Lighting / volumetric glow (auto)
+
+When an anime request emphasizes **lighting / 光影 / 打光 / glow / volumetric / cinematic lighting /
+dramatic lighting / rim light / chiaroscuro**, the anime path auto-chains the **Volumetric Glow**
+Anima LoRA (`Volumetric_glow_v2.0.safetensors`, Civitai 2633578 v2976629) after `@gpt-image-2` at
+strength 0.8, and prepends its recommended prompt words `kinrolstyle, volumetric glow, soft cinematic
+lighting, dreamlike atmosphere, luminous materials`. Keyword-triggered, so usually no extra flag.
+
+- File location: `ComfyUI/models/loras/Volumetric_glow_v2.0.safetensors`. **Degrades gracefully**:
+  if that file isn't present the LoRA is silently skipped (normal generation).
+- Tune with `--lora-scale` if asked; verified with an A/B (same prompt+seed, with vs without).
+
 ### Chaining multiple Anima LoRAs
 
 `--loras "name:strength,name2:strength2"` stacks an explicit LoRA chain (e.g.
@@ -348,10 +361,11 @@ The script prints JSON containing final image path and timing fields. Attach the
 
 ## Guardrails
 
-- **ALWAYS deliver the generated image to the user.** After a successful run, you MUST send/attach the
-  `final_path` PNG file in your reply (on Discord, attach it via the reply tool's files). Never just
-  report the path, describe the image, or say "done" — the actual image file must reach the user every
-  time an image is generated.
+- **DISCORD: MUST attach the image file in the SAME reply as generation.** After a successful run, you MUST
+  attach the `final_path` PNG file via the Discord reply tool's file attachment mechanism. **This is not optional** — do not just report the path, describe the image in text, or wait for the user to ask for it.
+  The image file must be attached in the first reply that contains the generation result. On Discord this
+  means including `[[image: /path/to/file.png]]` in your reply text so the gateway sends it as an actual
+  attachment. Never reply with only text and no image attachment — the user will have to ask again.
 
 - For anime / 二次元 / 動漫 / 美少女 / 插畫 / waifu / illustration requests, use `--anime` (Anima
   backend). Default to the 720p→Lanczos 1080p path (no hi-res fix); use `--anime --native-1080p`

@@ -42,6 +42,16 @@ PVC_UNET = "PVCStyleModelMovable_anima10.safetensors"
 PVC_TRIGGER = "pvc figure, pvc style, "
 PVC_KEYWORDS = ("pvc", "figurine", "手辦", "手办", "フィギュア", "figma")
 
+# Lighting / volumetric glow: Anima-base LoRA (Civitai 2633578 / v2976629, "Volumetric Glow").
+# Chained after @gpt-image-2 when the prompt emphasizes lighting; its recommended prompt words
+# (trigger kinrolstyle + the creator's atmospheric keywords) are prepended for best results.
+LIGHTING_LORA = "Volumetric_glow_v2.0.safetensors"
+LIGHTING_TRIGGER = "kinrolstyle, volumetric glow, soft cinematic lighting, dreamlike atmosphere, luminous materials, "
+LIGHTING_STRENGTH = 0.8
+LIGHTING_KEYWORDS = ("光影", "光線", "打光", "光照", "戲劇光", "戏剧光", "發光", "glow", "volumetric",
+                     "dramatic lighting", "dramatic light", "cinematic lighting", "chiaroscuro",
+                     "rim light", "volumetric light", "lighting")
+
 DEFAULT_GEN_SIZE = (1280, 720)     # 720p, inside Anima's 512-1536 trained range
 NATIVE_GEN_SIZE = (1920, 1088)     # /16-aligned; crop to 1080p
 FINAL_SIZE = (1920, 1080)
@@ -235,6 +245,12 @@ def run_anime(args) -> int:
     if any(k in pl or k in args.prompt for k in PVC_KEYWORDS):
         unet = PVC_UNET
         trigger = ANIMA_TRIGGER + PVC_TRIGGER
+    # Dramatic lighting -> chain the S1 lighting LoRA after @gpt-image-2 (only if the file exists,
+    # so a missing download degrades gracefully to a normal generation).
+    if any(k in pl or k in args.prompt for k in LIGHTING_KEYWORDS) and \
+            (Path(COMFY_DIR) / "models" / "loras" / LIGHTING_LORA).exists():
+        loras.append((LIGHTING_LORA, LIGHTING_STRENGTH))
+        trigger = trigger + LIGHTING_TRIGGER
     # Manual override: --loras "name:strength,name2:strength2" (replaces the auto chain).
     if getattr(args, "loras", None):
         loras = []
