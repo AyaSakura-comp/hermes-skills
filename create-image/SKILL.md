@@ -1,6 +1,6 @@
 ---
 name: create-image
-description: Generate or edit images locally on ROCm 7.2. Use when the user asks /create-image, wants to create/generate/edit an image, benchmark image generation time, or compare native 1080p versus lower-resolution upscale. Two backends. FLUX.2 (default, photoreal/general): klein-9B-KV at 1360x768 upscaled to 1920x1080, klein-4B for fast previews, native 1080p only when explicitly asked for high quality/native/原生1080p/高畫質. ANIME/二次元 (anime, illustration, 動漫, 美少女, 插畫, waifu): pass --anime to use ComfyUI + Anima + the @gpt-image-2 LoRA; defaults to 720p generated then Lanczos-upscaled to 1080p (no hi-res fix), and only goes native 1080p when high quality/原生/高畫質 is explicitly requested.
+description: Generate or edit images locally (FLUX.2 + Anima on ROCm 7.2). Use for /create-image or any request to create/generate/edit/convert an image (incl. photo→anime, photo→PVC). IMPORTANT FOR AGENTS - image generation is ALREADY DEPLOYED here; do NOT write your own diffusers/Stable-Diffusion/FLUX script and do NOT download models - RUN THIS SKILL'S SCRIPT. To run, activate the FLUX venv then call the script (works for all modes including anime/PVC, which only need urllib+PIL)- `cd /home/chihmin/models-work/flux2 && source .venv-rocm72/bin/activate && python ~/.hermes/skills/create-image/scripts/create_image.py "PROMPT" [flags]` - it prints JSON; attach its final_path PNG. Flags - (none)=FLUX.2 photoreal 1080p default; --fast-preview=quick draft; --native-1080p=high quality; --anime=anime/二次元/動漫/美少女/插畫/waifu (ComfyUI+Anima); --anime --image PHOTO=photo→anime img2img (--strength tunes how anime); PVC/figure/手辦/フィギュア prompts auto-switch to the Anima PVC checkpoint (use --anime). Read SKILL.md body for env/models/details before improvising.
 ---
 
 # Create Image
@@ -19,7 +19,8 @@ source .venv-rocm72/bin/activate
 python ~/.hermes/skills/create-image/scripts/create_image.py "YOUR PROMPT HERE"
 ```
 
-That prints a JSON object — take the `final_path` field and attach that PNG to your reply.
+That prints a JSON object — take the `final_path` field and **you MUST attach that PNG file in your
+reply to the user** (don't just report the path or say "done"; always send the actual image).
 
 Pick the mode by what the user asked for:
 
@@ -237,6 +238,10 @@ Anima specifics (fixed, no need to change):
 
 ### Photo → anime (img2img)
 
+**First step whenever an input image is given: open and look at the image** to decide if it's already
+anime/二次元 or a real photo — that determines the backend (Anima for anime targets, FLUX for photoreal
+edits) and a sensible `--strength`.
+
 Turn a normal photo into anime style: add `--anime --image /path/to/photo.jpg`. The photo is
 cover-cropped into an aspect-preserving /16 bucket (landscape `1280x720`, portrait `720x1280`,
 square `1024x1024`), VAE-encoded, then partially re-diffused and Lanczos-upscaled (long side 1920).
@@ -279,6 +284,33 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
 Flux/SDXL/Illustrious LoRAs will NOT load (architecture mismatch). Note many Civitai "Anima" entries
 are full checkpoints rather than LoRAs (like PVC above) — those are base swaps, not chain entries.
 
+## Named character requests (search for a reference first)
+
+If the user asks for a specific named character (an anime/game/VTuber/cartoon/celebrity character —
+anything you think is a real, identifiable character), **don't rely on the prompt alone**:
+
+1. **Search the web** for the character (e.g. WebSearch / image search) to confirm who they are and
+   what they look like.
+2. **Prefer full-body (全身) reference images** of the character (search terms like "<name> full body
+   / 全身 / full body reference"); a clear full-body shot is best, then half-body, then a clean
+   portrait as last resort. **Download a candidate, then OPEN/READ it to verify it's actually a usable
+   character picture** — i.e. a clear single depiction of the character or official CG/illustration,
+   NOT a logo, banner, text, meme, collage/grid, thumbnail, or an unrelated image. If it's not a good
+   (ideally full-body) character reference, **try the next candidate**. Give it **up to 20 attempts**.
+3. **If none of the 20 candidates is a usable reference, fall back to generating from the textual
+   description** you found on the web (hair/eye color, outfit, distinguishing features) — write those
+   details into the prompt and generate without an `--image` reference.
+4. When you do have a good reference, judge whether the character is anime/二次元 or a real-life/photoreal
+   person, then use it as the input image so the result actually resembles the character:
+   - anime/illustrated character → `--anime --image <ref>` (Anima img2img), with a prompt naming the
+     character + desired scene; tune `--strength` (lower keeps the character closer to the reference).
+   - real/photoreal person → `--image <ref>` on FLUX (or `--anime --image` if they want them in anime
+     style).
+5. Still attach the final generated image to the user (see guardrails).
+
+Only skip the search if the character is generic/original (e.g. "a cat girl", "a knight") — then just
+generate from the prompt.
+
 ## Warm daemon (DISABLED by default — OOM risk)
 
 A local daemon (`create-image-daemon.service`, port 7862) *can* keep the FLUX.2 9B-KV pipeline
@@ -316,10 +348,25 @@ The script prints JSON containing final image path and timing fields. Attach the
 
 ## Guardrails
 
+- **ALWAYS deliver the generated image to the user.** After a successful run, you MUST send/attach the
+  `final_path` PNG file in your reply (on Discord, attach it via the reply tool's files). Never just
+  report the path, describe the image, or say "done" — the actual image file must reach the user every
+  time an image is generated.
+
 - For anime / 二次元 / 動漫 / 美少女 / 插畫 / waifu / illustration requests, use `--anime` (Anima
   backend). Default to the 720p→Lanczos 1080p path (no hi-res fix); use `--anime --native-1080p`
   only when high quality / 原生1080p / 高畫質 is explicitly requested. All other rules below are
   FLUX.2-only and unchanged.
+- **Named character requests:** if the user asks for a specific identifiable character and no image is
+  attached, FIRST web-search the character and (if possible) download a reference image, judge whether
+  it's anime/二次元, and use it as the `--image` reference so the result resembles them (see "Named
+  character requests"). Skip only for generic/original subjects.
+- **When the user provides an input image, FIRST read/view that image** (open it and look) to judge
+  whether it is already anime/二次元 (illustration, drawn) or a real photo, before generating. Use
+  that judgement to pick the mode: anime/illustration source or an anime/PVC target → Anima
+  (`--anime --image`, img2img); a real photo you want kept photoreal/edited → FLUX (`--image`). If the
+  source is already anime and the user wants a different anime style (e.g. PVC), keep `--anime --image`
+  and a lower `--strength` to preserve the original character.
 - Photo→anime (`--anime --image`) uses `--strength` (default 0.65). Tune it from user feedback:
   too far from the original → lower it; not anime enough → raise it; keep `--seed` fixed while tuning.
 - PVC / figure / 手辦 / フィギュア style requests: keep `--anime` and include "pvc figure" in the prompt;
