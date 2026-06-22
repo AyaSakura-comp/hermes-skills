@@ -284,19 +284,22 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
 - Works with text2img and `--image` (photo → PVC figure). ~32–35 s at 720p→1080p with default cfg 1.0.
 - File location: `ComfyUI/models/diffusion_models/PVCStyleModelMovable_anima10.safetensors`.
 
-### Lighting / volumetric glow (prompt-only by default)
+### Lighting / atmosphere enhancer (auto)
 
 When an anime request emphasizes **lighting / 光影 / 打光 / glow / volumetric / cinematic lighting /
-dramatic lighting / rim light / chiaroscuro**, control the lighting with prompt text only. **Do not
-auto-chain the Volumetric Glow / Light Concepts LoRAs**; A/B tests showed they can dominate the image
-and make lighting/glow too heavy.
+dramatic lighting / rim light / chiaroscuro / moonlit / reflections**, auto-chain the **Anima Lighting
+Atmosphere Enhancer** LoRA from Civitai (`exposure_Lighting-step00000300.safetensors`, model 2628200,
+version 3034647) after `@gpt-image-2` at strength **0.5**, and add a short lighting trigger.
+
+Why moderate strength: the author recommends 0–0.9 and notes stronger exposure can lose details or create
+unclear vertical lines; local A/B testing showed 0.5 gives a more visible lighting boost while still preserving the subject reasonably well.
+If the file is not installed, the script degrades gracefully to prompt-only lighting.
 
 Good prompt phrases: `soft cinematic lighting`, `moonlit water reflections`, `dramatic rim light`,
 `subtle volumetric glow`, `starry night`, `blue hour`, `reflected lake light`.
 
-If the user explicitly asks to try a lighting LoRA anyway, use `--loras` manually with a low strength,
-e.g. `--loras "gpt-image-2_anima-base1_v1-1.safetensors:1.0,Volumetric_glow_v2.0.safetensors:0.25"`; do not enable it
-automatically from keywords.
+To override manually, use `--loras`, e.g.
+`--loras "gpt-image-2_anima-base1_v1-1.safetensors:1.0,exposure_Lighting-step00000300.safetensors:0.25"` or `:0.4`.
 
 ### Chaining multiple Anima LoRAs
 

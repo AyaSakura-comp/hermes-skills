@@ -42,9 +42,15 @@ PVC_UNET = "PVCStyleModelMovable_anima10.safetensors"
 PVC_TRIGGER = "pvc figure, pvc style, "
 PVC_KEYWORDS = ("pvc", "figurine", "手辦", "手办", "フィギュア", "figma")
 
-# Lighting is prompt-only by default. Do NOT auto-chain lighting LoRAs: recent A/B tests showed
-# Volumetric Glow / Light Concepts can dominate the image too much. If explicitly requested, users can
-# still pass them via --loras "Volumetric_glow_v2.0.safetensors:0.25".
+# Lighting / atmosphere enhancer: Anima-base LoRA (Civitai 2628200 / v3034647, "exposure").
+# Chain it only when the prompt emphasizes lighting. This model can change exposure strongly and may
+# lose some details, so keep the default strength low.
+LIGHTING_LORA = "exposure_Lighting-step00000300.safetensors"
+LIGHTING_TRIGGER = "soft cinematic lighting, atmospheric lighting, balanced exposure, "
+LIGHTING_STRENGTH = 0.5
+LIGHTING_KEYWORDS = ("光影", "光線", "打光", "光照", "戲劇光", "戏剧光", "發光", "glow", "volumetric",
+                     "dramatic lighting", "dramatic light", "cinematic lighting", "chiaroscuro",
+                     "rim light", "volumetric light", "lighting", "moonlit", "reflections")
 
 # Posing / "airflow" aesthetic: Anima-base LoRA (Civitai 2707692 / v3041355, "AiryFlat Style").
 # Chained BEFORE @gpt-image-2 when the user wants posing/擺拍. Trigger airyf1at; recommended weight ~1.2.
@@ -320,7 +326,12 @@ def run_anime(args) -> int:
             (Path(COMFY_DIR) / "models" / "loras" / POSING_LORA).exists():
         loras.insert(0, (POSING_LORA, POSING_STRENGTH))
         trigger = POSING_TRIGGER + trigger
-    # Lighting/glow is controlled by prompt text only; do not auto-load lighting LoRAs.
+    # Dramatic lighting -> chain the lighting/atmosphere enhancer LoRA after @gpt-image-2 if present.
+    # Missing file degrades gracefully to prompt-only lighting.
+    if any(k in pl or k in args.prompt for k in LIGHTING_KEYWORDS) and \
+            (Path(COMFY_DIR) / "models" / "loras" / LIGHTING_LORA).exists():
+        loras.append((LIGHTING_LORA, LIGHTING_STRENGTH))
+        trigger = trigger + LIGHTING_TRIGGER
     # Manual override: --loras "name:strength,name2:strength2" (replaces the auto chain).
     if getattr(args, "loras", None):
         loras = []
