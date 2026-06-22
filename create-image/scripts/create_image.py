@@ -27,6 +27,25 @@ DEFAULT_9B_OUTPUT_SIZE = (1360, 768)
 FAST_REFERENCE_SIZE = (768, 432)
 NATIVE_OUTPUT_SIZE = (1920, 1088)
 FINAL_SIZE = (1920, 1080)
+DEFAULT_FLUX_ASPECT_RATIO = "16:9"
+FLUX_FINAL_SIZE_BY_ASPECT = {
+    "16:9": (1920, 1080),
+    "9:16": (1080, 1920),
+    "3:2": (1776, 1184),
+    "2:3": (1184, 1776),
+    "4:3": (1664, 1248),
+    "3:4": (1248, 1664),
+    "1:1": (1440, 1440),
+}
+FLUX_9B_GEN_SIZE_BY_ASPECT = {
+    "16:9": DEFAULT_9B_OUTPUT_SIZE,
+    "9:16": (768, 1360),
+    "3:2": (1248, 832),
+    "2:3": (832, 1248),
+    "4:3": (1184, 880),
+    "3:4": (880, 1184),
+    "1:1": (1024, 1024),
+}
 DEFAULT_DAEMON_URL = "http://127.0.0.1:7862"
 
 
@@ -46,6 +65,50 @@ def round_to_multiple(value: float, multiple: int = 16) -> int:
 def parse_size(value: str) -> tuple[int, int]:
     width_str, height_str = value.lower().split("x", 1)
     return int(width_str), int(height_str)
+
+
+def normalize_aspect_ratio(value: str | None, default: str = DEFAULT_FLUX_ASPECT_RATIO) -> str:
+    if not value:
+        return default
+    v = value.strip().lower().replace("x", ":").replace("/", ":")
+    aliases = {
+        "portrait": "2:3",
+        "vertical": "2:3",
+        "tall": "2:3",
+        "landscape": "16:9",
+        "wide": "16:9",
+        "square": "1:1",
+    }
+    v = aliases.get(v, v)
+    if ":" not in v:
+        raise ValueError(f"aspect ratio must look like 2:3, 16:9, or square; got {value!r}")
+    left, right = v.split(":", 1)
+    w, h = int(left), int(right)
+    if w <= 0 or h <= 0:
+        raise ValueError(f"aspect ratio dimensions must be positive; got {value!r}")
+    from math import gcd
+    g = gcd(w, h)
+    return f"{w // g}:{h // g}"
+
+
+def size_for_aspect(area_pixels: int, aspect_ratio: str) -> tuple[int, int]:
+    w_ratio, h_ratio = (int(part) for part in aspect_ratio.split(":", 1))
+    h = (area_pixels * h_ratio / w_ratio) ** 0.5
+    w = h * w_ratio / h_ratio
+    return round_to_multiple(w), round_to_multiple(h)
+
+
+def resolve_flux_sizes(model_label: str, aspect_ratio: str | None, native: bool = False) -> tuple[int, int, int, int, str]:
+    aspect = normalize_aspect_ratio(aspect_ratio)
+    final_w, final_h = FLUX_FINAL_SIZE_BY_ASPECT.get(aspect, size_for_aspect(1920 * 1080, aspect))
+    if native:
+        gen_w, gen_h = round_to_multiple(final_w), round_to_multiple(final_h)
+    elif model_label == "4b":
+        gen_w, gen_h = size_for_aspect(FAST_PREVIEW_OUTPUT_SIZE[0] * FAST_PREVIEW_OUTPUT_SIZE[1], aspect)
+    else:
+        gen_w, gen_h = FLUX_9B_GEN_SIZE_BY_ASPECT.get(
+            aspect, size_for_aspect(DEFAULT_9B_OUTPUT_SIZE[0] * DEFAULT_9B_OUTPUT_SIZE[1], aspect))
+    return gen_w, gen_h, final_w, final_h, aspect
 
 
 def should_try_daemon(args, model_label: str) -> bool:
@@ -72,6 +135,7 @@ def build_daemon_payload(args, mode: str) -> dict:
         "out_dir": args.out_dir,
         "prefix": args.prefix,
         "output_size": args.output_size,
+        "aspect_ratio": getattr(args, "aspect_ratio", None),
         "mode": mode,
     }
 
@@ -107,6 +171,8 @@ def main():
     parser.add_argument("--out-dir", default="/home/chihmin/models-work/flux2/output/create-image")
     parser.add_argument("--prefix", default=None)
     parser.add_argument("--output-size", default=None, help="Output size as WxH (e.g. 1080x1440 for 3:4). Overrides native/upscale sizing.")
+    parser.add_argument("--aspect-ratio", "--ar", default=None,
+                        help="Output aspect ratio such as 2:3, 3:2, 16:9, 1:1, portrait, landscape. Anime defaults to 2:3; FLUX defaults to 16:9.")
     parser.add_argument("--anime", "--anime-mode", "--二次元", action="store_true", dest="anime",
                         help="Anime/二次元 path: ComfyUI + Anima + @gpt-image-2 LoRA. Default 720p->Lanczos 1080p; --native-1080p for native.")
     parser.add_argument("--strength", type=float, default=None,
@@ -130,28 +196,21 @@ def main():
         model_id = MODEL_ID_9B_KV
         model_label = "9b-kv"
 
+    gen_w, gen_h, final_w, final_h, aspect_ratio = resolve_flux_sizes(
+        model_label, args.aspect_ratio, native=args.native_1080p)
+    if args.output_size:
+        final_w, final_h = parse_size(args.output_size)
+
     if args.output_size:
         mode = ("edit-" if is_edit else "") + f"{model_label}-custom-{args.output_size}"
     elif args.native_1080p:
-        mode = ("edit-" if is_edit else "") + f"{model_label}-native-1080p"
+        mode = ("edit-" if is_edit else "") + f"{model_label}-native-{aspect_ratio.replace(':', 'x')}"
     elif model_label == "4b":
-        mode = ("edit-" if is_edit else "") + "4b-fast-preview-1080p"
+        mode = ("edit-" if is_edit else "") + f"4b-fast-preview-{aspect_ratio.replace(':', 'x')}"
     else:
-        mode = ("edit-" if is_edit else "") + "9b-default-1360x768-upscale-1080p"
+        mode = ("edit-" if is_edit else "") + f"9b-default-{aspect_ratio.replace(':', 'x')}-upscale"
 
-    if args.native_1080p:
-        gen_w, gen_h = NATIVE_OUTPUT_SIZE
-    elif model_label == "4b":
-        gen_w, gen_h = FAST_PREVIEW_OUTPUT_SIZE
-    else:
-        gen_w, gen_h = DEFAULT_9B_OUTPUT_SIZE
     ref_w, ref_h = FAST_REFERENCE_SIZE
-    final_w, final_h = FINAL_SIZE
-
-    if args.output_size:
-        # Custom final size only changes post-processing. The generation bucket remains model/mode-specific
-        # to avoid arbitrary ROCm VAE shapes.
-        final_w, final_h = parse_size(args.output_size)
     seed = args.seed if args.seed is not None else int(time.time()) % (2**31)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -240,6 +299,7 @@ def main():
         "steps": args.steps,
         "guidance_scale": args.guidance_scale,
         "generated_size": [gen_w, gen_h],
+        "aspect_ratio": aspect_ratio,
         "reference_size": [ref_w, ref_h] if is_edit else None,
         "final_size": [final_w, final_h],
         "input_image": str(Path(args.image).resolve()) if is_edit else None,

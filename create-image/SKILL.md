@@ -30,9 +30,9 @@ Pick the mode by what the user asked for:
 | normal / photo / general (default) | *(nothing — default 9B → 1080p, ~25–60s)* |
 | quick draft / 快速預覽 / 草稿 | `--fast-preview` *(4B, ~7s)* |
 | high quality / 原生 / 高畫質 / native | `--native-1080p` *(~195s)* |
-| **anime / 二次元 / 動漫 / 美少女 / 插畫 / waifu** | `--anime` *(720p→1080p, ~70s)* |
+| **anime / 二次元 / 動漫 / 美少女 / 插畫 / waifu** | `--anime` *(default 2:3 portrait, 768x1152→1184x1776, ~30s; cfg 1.0)* |
 | **PVC figure / 手辦 / フィギュア style** | `--anime` *(prompt with "pvc figure …" → auto base-swap to PVC checkpoint)* |
-| anime, high quality | `--anime --native-1080p` *(~320s)* |
+| anime, high quality | `--anime --native-1080p` *(~160s estimated with cfg 1.0; slower if higher cfg)* |
 | **turn a photo INTO anime** | `--anime --image /path/to/photo.jpg` *(img2img; add `--strength 0.5–0.8` to tune)* |
 | edit a photo (non-anime) | `--image /path/to/photo.jpg` |
 
@@ -120,9 +120,13 @@ commands). Scripts: `scripts/create_image.py` (entry), `scripts/anima.py` (anime
 Default prioritizes quality while staying much faster than native 1080p:
 
 1. Use `FLUX.2-klein-9B-kv`
-2. Generate at `1360x768`
+2. Generate at `1360x768` (16:9 landscape)
 3. Lanczos upscale to exact `1920x1080`
 4. Return the final `*_1080p.png`
+
+FLUX supports `--aspect-ratio`, but keep FLUX default at 16:9: benchmarking `832x1248 -> 1184x1776`
+(2:3, similar pixels) was **much slower** than landscape (411s vs 22s warm generation in a one-process
+A/B). Use FLUX portrait only when explicitly requested; anime portrait is the fast path.
 
 ```bash
 cd /home/chihmin/models-work/flux2
@@ -131,7 +135,7 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
   "PROMPT HERE"
 ```
 
-Expected time: about 46 seconds of compute for 9B-KV `1360x768 → 1920x1080` run in-process, plus
+Expected time: about 22–46 seconds of compute for 9B-KV `1360x768 → 1920x1080` run in-process, plus
 model-load overhead each call (the warm daemon that used to amortize this is disabled — see below).
 
 ## Fast preview mode
@@ -203,9 +207,11 @@ For anime / 二次元 / 動漫 / 美少女 / 插畫 / waifu / illustration-style
 checkpoint (NVIDIA Cosmos-Predict2-2B finetune) + the `@gpt-image-2` style LoRA. The trigger word
 `@gpt-image-2` is prepended automatically.
 
-Default anime behaviour (fast, recommended): generate at **720p (1280x720)** — inside Anima's
-512–1536 trained range — then **Lanczos upscale to exact 1920x1080**. **No hi-res fix** (a 2nd
-diffusion pass at 1080p barely saves time on this GPU and isn't worth it).
+Default anime behaviour (fast, recommended): generate a **2:3 portrait** at `768x1152` — inside
+Anima's 512–1536 trained range — then **Lanczos upscale to 1184x1776** (~1080p-equivalent pixels).
+**No hi-res fix** (a 2nd diffusion pass barely saves time on this GPU and isn't worth it).
+Use `--aspect-ratio 16:9`, `--aspect-ratio 3:2`, `--aspect-ratio 1:1`, etc. when the user asks for a
+specific shape.
 
 ```bash
 cd /home/chihmin/models-work/flux2
@@ -215,7 +221,7 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
   --anime
 ```
 
-Expected warm time: about **70 seconds** for `1280x720 -> 1920x1080` (30 steps, er_sde, cfg 5).
+Expected warm time: about **30 seconds** for `768x1152 -> 1184x1776` (30 steps, er_sde, cfg 1.0). Use a higher `--guidance-scale` only when the user explicitly wants stronger prompt adherence; `--guidance-scale 5` is about 2x slower (~59–70s depending on shape).
 
 High-quality / native anime 1080p — only when the user explicitly asks for high quality / 原生1080p /
 高畫質 / native:
@@ -226,15 +232,15 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
 ```
 
 Native anime generates `1920x1088` directly then center-crops to `1920x1080`. Expected warm time:
-about **320 seconds** (~4x slower than the 720p upscale path; quality is higher and avoids the slight
+about **160 seconds** with default cfg 1.0 (about **320 seconds** if using `--guidance-scale 5`); quality is higher and avoids the slight
 over-range artifacts of pushing beyond 1536).
 
 Anima specifics (fixed, no need to change):
 - diffusion model `anima_baseV10.safetensors`, text encoder `anima_baseV10_txt.safetensors`
   (CLIPLoader type `qwen_image`), VAE `qwen_image_vae.safetensors`, LoRA
   `gpt-image-2_anima-base1_v1-1.safetensors` at strength 1.0.
-- defaults: steps 30, cfg 5.0, sampler `er_sde`, scheduler `simple`. Override with `--steps` /
-  `--guidance-scale` / `--lora-scale` if asked.
+- defaults: aspect ratio 2:3, steps 30, cfg 1.0, sampler `er_sde`, scheduler `simple`. Override with
+  `--aspect-ratio`, `--steps`, `--guidance-scale` / `--lora-scale` if asked. CFG 1.0 is the measured fast path (~2x faster than cfg 5.0); use higher CFG only when the user asks for stronger prompt adherence.
 - ComfyUI (port 8188, repo `/home/chihmin/src/ComfyUI`) is started on demand if not already running.
 
 ### Photo → anime (img2img)
@@ -260,7 +266,7 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
     (e.g. 0.7 → 0.8) and regenerate.
   - Keep the same `--seed` when tuning strength so only the style amount changes.
 - A short prompt still helps steer the style (`@gpt-image-2` trigger is auto-added).
-- Warm time ≈ **70 s** (same as 720p text2img). Output preserves the photo's orientation.
+- Warm time ≈ **32–35 s** with default cfg 1.0 (same as 720p text2img; higher CFG is slower). Output preserves the photo's orientation.
 
 ### PVC figure style (auto)
 
@@ -275,20 +281,22 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
   "a pvc figure of an anime girl in a dynamic battle pose, glossy finish, figure stand" --anime
 ```
 
-- Works with text2img and `--image` (photo → PVC figure). ~70 s at 720p→1080p.
+- Works with text2img and `--image` (photo → PVC figure). ~32–35 s at 720p→1080p with default cfg 1.0.
 - File location: `ComfyUI/models/diffusion_models/PVCStyleModelMovable_anima10.safetensors`.
 
-### Lighting / volumetric glow (auto)
+### Lighting / volumetric glow (prompt-only by default)
 
 When an anime request emphasizes **lighting / 光影 / 打光 / glow / volumetric / cinematic lighting /
-dramatic lighting / rim light / chiaroscuro**, the anime path auto-chains the **Volumetric Glow**
-Anima LoRA (`Volumetric_glow_v2.0.safetensors`, Civitai 2633578 v2976629) after `@gpt-image-2` at
-strength 0.8, and prepends its recommended prompt words `kinrolstyle, volumetric glow, soft cinematic
-lighting, dreamlike atmosphere, luminous materials`. Keyword-triggered, so usually no extra flag.
+dramatic lighting / rim light / chiaroscuro**, control the lighting with prompt text only. **Do not
+auto-chain the Volumetric Glow / Light Concepts LoRAs**; A/B tests showed they can dominate the image
+and make lighting/glow too heavy.
 
-- File location: `ComfyUI/models/loras/Volumetric_glow_v2.0.safetensors`. **Degrades gracefully**:
-  if that file isn't present the LoRA is silently skipped (normal generation).
-- Tune with `--lora-scale` if asked; verified with an A/B (same prompt+seed, with vs without).
+Good prompt phrases: `soft cinematic lighting`, `moonlit water reflections`, `dramatic rim light`,
+`subtle volumetric glow`, `starry night`, `blue hour`, `reflected lake light`.
+
+If the user explicitly asks to try a lighting LoRA anyway, use `--loras` manually with a low strength,
+e.g. `--loras "gpt-image-2_anima-base1_v1-1.safetensors:1.0,Volumetric_glow_v2.0.safetensors:0.25"`; do not enable it
+automatically from keywords.
 
 ### Chaining multiple Anima LoRAs
 
@@ -352,8 +360,9 @@ runs **in-process** instead, which is reliable.
 --prefix name            # output filename prefix
 --steps 4                # default / fixed distilled step count
 --output-size 1080x1440  # force a custom final size via post-processing
---native-1080p           # force native 1920x1088 then crop to 1080p (FLUX or, with --anime, Anima)
---anime                  # anime/二次元 path: ComfyUI + Anima + @gpt-image-2 LoRA (720p->Lanczos 1080p)
+--aspect-ratio 2:3       # requested output ratio; anime defaults to 2:3, FLUX defaults to 16:9
+--native-1080p           # force native generation at the selected aspect (slower)
+--anime                  # anime/二次元 path: ComfyUI + Anima + @gpt-image-2 LoRA (default 2:3 portrait)
 --strength 0.65          # with --anime --image: photo->anime denoise (higher=more anime, default 0.65)
 ```
 
@@ -368,9 +377,9 @@ The script prints JSON containing final image path and timing fields. Attach the
   attachment. Never reply with only text and no image attachment — the user will have to ask again.
 
 - For anime / 二次元 / 動漫 / 美少女 / 插畫 / waifu / illustration requests, use `--anime` (Anima
-  backend). Default to the 720p→Lanczos 1080p path (no hi-res fix); use `--anime --native-1080p`
-  only when high quality / 原生1080p / 高畫質 is explicitly requested. All other rules below are
-  FLUX.2-only and unchanged.
+  backend). Default to the 2:3 portrait `768x1152 → 1184x1776` Lanczos path (no hi-res fix); use
+  `--anime --native-1080p` only when high quality / 原生1080p / 高畫質 is explicitly requested. Use
+  `--aspect-ratio` when the user requests a different shape. All other rules below are FLUX.2-only and unchanged.
 - **Named character requests:** if the user asks for a specific identifiable character and no image is
   attached, FIRST web-search the character and (if possible) download a reference image, judge whether
   it's anime/二次元, and use it as the `--image` reference so the result resembles them (see "Named
@@ -387,10 +396,10 @@ The script prints JSON containing final image path and timing fields. Attach the
   the script auto-swaps to the PVC Anima checkpoint + @gpt-image-2. Don't try to load PVC as a LoRA
   (it's a full checkpoint). Only Anima-base LoRAs/checkpoints work on the Anima backend.
 - Do NOT enable or keep the FLUX warm daemon resident (it OOMs the box); all requests run in-process.
-- Prefer default 9B-KV `1360x768 → 1920x1080` mode for normal (non-anime) requests.
+- Prefer default 9B-KV `1360x768 → 1920x1080` 16:9 mode for normal (non-anime) requests; FLUX 2:3 portrait was benchmarked much slower (`832x1248` took ~411s warm vs ~22s for `1360x768`), so use FLUX portrait only when explicitly requested.
 - Use `--fast-preview` / 4B only when the user asks for quick preview / 快速預覽 / 草稿.
 - Use `--native-1080p` / 9B native only when the user asks for high quality / 高畫質 / native / 原生1080p.
-- Keep the ROCm/VAE buckets fixed: 9B default output `1360x768`, 4B preview output `1024x576`, reference conditioning `768x432`, native output `1920x1088`; avoid direct arbitrary 4:3 / 1:1 generation because VAE decode can take several minutes on ROCm.
+- Keep the ROCm/VAE buckets fixed: FLUX 9B default output `1360x768`, 4B preview output `1024x576`, reference conditioning `768x432`; Anima default output `768x1152 → 1184x1776`. Prefer the built-in `--aspect-ratio` buckets over arbitrary sizes.
 - Do not kill, stop, or restart `llama-server` / `qwen-mtp.service` for image generation.
 - Do not enable VAE tiling for 1080p unless debugging; it is stable but very slow.
 - If native 1080p OOMs or available memory is too low, report the issue and fall back to default upscale mode instead of stopping other services.

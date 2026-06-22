@@ -42,22 +42,37 @@ PVC_UNET = "PVCStyleModelMovable_anima10.safetensors"
 PVC_TRIGGER = "pvc figure, pvc style, "
 PVC_KEYWORDS = ("pvc", "figurine", "手辦", "手办", "フィギュア", "figma")
 
-# Lighting / volumetric glow: Anima-base LoRA (Civitai 2633578 / v2976629, "Volumetric Glow").
-# Chained after @gpt-image-2 when the prompt emphasizes lighting; its recommended prompt words
-# (trigger kinrolstyle + the creator's atmospheric keywords) are prepended for best results.
-LIGHTING_LORA = "Volumetric_glow_v2.0.safetensors"
-LIGHTING_TRIGGER = "kinrolstyle, volumetric glow, soft cinematic lighting, dreamlike atmosphere, luminous materials, "
-LIGHTING_STRENGTH = 0.8
-LIGHTING_KEYWORDS = ("光影", "光線", "打光", "光照", "戲劇光", "戏剧光", "發光", "glow", "volumetric",
-                     "dramatic lighting", "dramatic light", "cinematic lighting", "chiaroscuro",
-                     "rim light", "volumetric light", "lighting")
+# Lighting is prompt-only by default. Do NOT auto-chain lighting LoRAs: recent A/B tests showed
+# Volumetric Glow / Light Concepts can dominate the image too much. If explicitly requested, users can
+# still pass them via --loras "Volumetric_glow_v2.0.safetensors:0.25".
 
-DEFAULT_GEN_SIZE = (1280, 720)     # 720p, inside Anima's 512-1536 trained range
-NATIVE_GEN_SIZE = (1920, 1088)     # /16-aligned; crop to 1080p
-FINAL_SIZE = (1920, 1080)
+# Posing / "airflow" aesthetic: Anima-base LoRA (Civitai 2707692 / v3041355, "AiryFlat Style").
+# Chained BEFORE @gpt-image-2 when the user wants posing/擺拍. Trigger airyf1at; recommended weight ~1.2.
+POSING_LORA = "airyf1at_style.safetensors"
+POSING_TRIGGER = "airyf1at, masterpiece, very aesthetic, best quality, "
+POSING_STRENGTH = 1.2
+POSING_KEYWORDS = ("擺拍", "摆拍", "擺姿", "摆姿", "airflow", "airyflat", "airy flat", "airyf1at",
+                   "posing", "pose shot", "ポーズ")
+
+# Aspect buckets: generate around 720p-equivalent work, then Lanczos upscale to ~1080p-equivalent
+# output pixels. Default is portrait 2:3 because it is faster than native tall generation and better
+# matches character/waifu requests. Users can override with --aspect-ratio (e.g. 16:9, 3:2, 1:1).
+DEFAULT_ANIME_ASPECT_RATIO = "2:3"
+ANIME_ASPECT_BUCKETS = {
+    "16:9": ((1280, 720), (1920, 1080)),
+    "9:16": ((720, 1280), (1080, 1920)),
+    "3:2": ((1152, 768), (1776, 1184)),
+    "2:3": ((768, 1152), (1184, 1776)),
+    "4:3": ((1152, 864), (1664, 1248)),
+    "3:4": ((864, 1152), (1248, 1664)),
+    "1:1": ((1024, 1024), (1536, 1536)),
+}
+DEFAULT_GEN_SIZE = ANIME_ASPECT_BUCKETS["16:9"][0]     # legacy landscape bucket
+NATIVE_GEN_SIZE = (1920, 1088)     # legacy /16-aligned landscape bucket; crop to 1080p
+FINAL_SIZE = ANIME_ASPECT_BUCKETS["16:9"][1]
 
 ANIME_STEPS = 30
-ANIME_CFG = 5.0
+ANIME_CFG = 1.0
 ANIME_SAMPLER = "er_sde"
 ANIME_SCHEDULER = "simple"
 ANIME_LORA_STRENGTH = 1.0
@@ -70,6 +85,61 @@ IMG2IMG_BUCKETS = {
     "portrait": ((720, 1280), (1080, 1920)),
     "square": ((1024, 1024), (1536, 1536)),
 }
+
+
+def _normalize_aspect_ratio(value: str | None) -> str:
+    if not value:
+        return DEFAULT_ANIME_ASPECT_RATIO
+    v = value.strip().lower().replace("x", ":").replace("/", ":")
+    aliases = {
+        "portrait": "2:3",
+        "vertical": "2:3",
+        "tall": "2:3",
+        "landscape": "16:9",
+        "wide": "16:9",
+        "square": "1:1",
+    }
+    v = aliases.get(v, v)
+    if ":" not in v:
+        raise ValueError(f"aspect ratio must look like 2:3, 16:9, or square; got {value!r}")
+    left, right = v.split(":", 1)
+    w, h = int(left), int(right)
+    if w <= 0 or h <= 0:
+        raise ValueError(f"aspect ratio dimensions must be positive; got {value!r}")
+    from math import gcd
+    g = gcd(w, h)
+    return f"{w // g}:{h // g}"
+
+
+def _round_to_multiple(value: float, multiple: int = 16) -> int:
+    return max(multiple, int(round(value / multiple)) * multiple)
+
+
+def _fit_area_to_aspect(area_pixels: int, aspect_ratio: str) -> tuple[int, int]:
+    """Return a /16-aligned size with approximately area_pixels and the requested aspect."""
+    w_ratio, h_ratio = (int(part) for part in aspect_ratio.split(":", 1))
+    h = (area_pixels * h_ratio / w_ratio) ** 0.5
+    w = h * w_ratio / h_ratio
+    return _round_to_multiple(w), _round_to_multiple(h)
+
+
+def _ceil_to_multiple(value: int, multiple: int = 16) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+def resolve_anime_sizes(aspect_ratio: str | None, native: bool = False) -> tuple[int, int, int, int, str]:
+    """Resolve (gen_w, gen_h, final_w, final_h, normalized_aspect_ratio)."""
+    aspect = _normalize_aspect_ratio(aspect_ratio)
+    gen_size, final_size = ANIME_ASPECT_BUCKETS.get(aspect, (None, None))
+    if gen_size is None:
+        gen_size = _fit_area_to_aspect(1280 * 720, aspect)
+        final_size = _fit_area_to_aspect(1920 * 1080, aspect)
+    final_w, final_h = final_size
+    if native:
+        gen_w, gen_h = _ceil_to_multiple(final_w), _ceil_to_multiple(final_h)
+    else:
+        gen_w, gen_h = gen_size
+    return gen_w, gen_h, final_w, final_h, aspect
 
 
 def _get(path: str, timeout: float = 30.0):
@@ -245,12 +315,12 @@ def run_anime(args) -> int:
     if any(k in pl or k in args.prompt for k in PVC_KEYWORDS):
         unet = PVC_UNET
         trigger = ANIMA_TRIGGER + PVC_TRIGGER
-    # Dramatic lighting -> chain the S1 lighting LoRA after @gpt-image-2 (only if the file exists,
-    # so a missing download degrades gracefully to a normal generation).
-    if any(k in pl or k in args.prompt for k in LIGHTING_KEYWORDS) and \
-            (Path(COMFY_DIR) / "models" / "loras" / LIGHTING_LORA).exists():
-        loras.append((LIGHTING_LORA, LIGHTING_STRENGTH))
-        trigger = trigger + LIGHTING_TRIGGER
+    # Posing / airyflat -> chain the AiryFlat LoRA BEFORE @gpt-image-2 (only if the file exists).
+    if any(k in pl or k in args.prompt for k in POSING_KEYWORDS) and \
+            (Path(COMFY_DIR) / "models" / "loras" / POSING_LORA).exists():
+        loras.insert(0, (POSING_LORA, POSING_STRENGTH))
+        trigger = POSING_TRIGGER + trigger
+    # Lighting/glow is controlled by prompt text only; do not auto-load lighting LoRAs.
     # Manual override: --loras "name:strength,name2:strength2" (replaces the auto chain).
     if getattr(args, "loras", None):
         loras = []
@@ -269,6 +339,7 @@ def run_anime(args) -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     uploaded_name = None
 
+    aspect_ratio = None
     if is_edit:
         # photo -> anime: pick an aspect-preserving /16 bucket, cover-crop, encode, restyle.
         from PIL import ImageOps  # noqa: PLC0415
@@ -280,9 +351,11 @@ def run_anime(args) -> int:
         uploaded_name = _upload_image(prepped, f"anima_src_{timestamp}.png")
         mode = f"anima-img2img-{key}-denoise{denoise}"
     else:
-        gen_w, gen_h = NATIVE_GEN_SIZE if native else DEFAULT_GEN_SIZE
-        final_w, final_h = FINAL_SIZE
-        mode = "anima-native-1080p" if native else "anima-720p-upscale-1080p"
+        gen_w, gen_h, final_w, final_h, aspect_ratio = resolve_anime_sizes(
+            getattr(args, "aspect_ratio", None), native=native)
+        if getattr(args, "output_size", None):
+            final_w, final_h = (int(part) for part in args.output_size.lower().split("x", 1))
+        mode = ("anima-native" if native else "anima-upscale") + f"-{aspect_ratio.replace(':', 'x')}"
 
     prefix = args.prefix or f"anima_{mode}_{timestamp}"
     raw_path = out_dir / f"{prefix}_raw_{gen_w}x{gen_h}.png"
@@ -343,6 +416,7 @@ def run_anime(args) -> int:
         "loras": [{"name": n, "strength": s} for n, s in loras],
         "trigger": trigger.strip(),
         "mode": mode,
+        "aspect_ratio": aspect_ratio,
         "native_1080p": native,
         "img2img": is_edit,
         "input_image": str(Path(args.image).resolve()) if is_edit else None,
