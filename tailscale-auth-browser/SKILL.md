@@ -1,3 +1,14 @@
+---
+name: tailscale-auth-browser
+description: Register and log in to Tailscale via browser automation (OAuth/GitHub).
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [tailscale, auth, browser, oauth]
+---
+
 # Tailscale Browser Registration Flow
 
 Register and log in to Tailscale via browser automation (OAuth/GitHub).

@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -10,7 +11,61 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from diffusers import Flux2KleinPipeline
+if os.environ.get("DISABLE_MIOPEN") != "0":
+    torch.backends.cudnn.enabled = False
+
+# Patch scaled_dot_product_attention to force inputs to be contiguous.
+# AOTriton attn_fwd on ROCm is ~2.5x slower on non-contiguous tensors passed by diffusers.
+if os.environ.get("CREATE_IMAGE_NO_CONTIG") != "1":
+    orig_sdpa = torch.nn.functional.scaled_dot_product_attention
+    def patched_sdpa(*args, **kwargs):
+        args = list(args)
+        if len(args) > 0:
+            args[0] = args[0].contiguous()
+        if len(args) > 1:
+            args[1] = args[1].contiguous()
+        if len(args) > 2:
+            args[2] = args[2].contiguous()
+        
+        if 'query' in kwargs:
+            kwargs['query'] = kwargs['query'].contiguous()
+        if 'key' in kwargs:
+            kwargs['key'] = kwargs['key'].contiguous()
+        if 'value' in kwargs:
+            kwargs['value'] = kwargs['value'].contiguous()
+            
+        return orig_sdpa(*args, **kwargs)
+# Patch linear to trace shapes
+if os.environ.get("TRACE_LINEAR_SHAPES") == "1":
+    orig_linear = torch.nn.functional.linear
+    seen_shapes = set()
+    def patched_linear(input, weight, bias=None):
+        shape_key = (tuple(input.shape), tuple(weight.shape), bias is not None)
+        if shape_key not in seen_shapes:
+            seen_shapes.add(shape_key)
+            print(f"[linear trace] input: {list(input.shape)}, weight: {list(weight.shape)}, bias: {bias is not None}, dtype: {input.dtype}")
+        return orig_linear(input, weight, bias)
+    torch.nn.functional.linear = patched_linear
+
+# Optional experimental FLUX.2 linear replacements. Disabled by default.
+# FLUX2_BIG_WMMA_LINEAR is the actual large-GEMM replacement path; it is useful
+# for profiling/proof-of-replacement, but currently slower than PyTorch/rocBLASLt.
+if os.environ.get("FLUX2_BIG_WMMA_LINEAR") == "1":
+    from flux2_big_wmma_linear import install_patch as install_big_wmma_patch
+    install_big_wmma_patch()
+    print("[linear patch] enabled custom BIG BF16 v_wmma linear kernel")
+elif os.environ.get("FLUX2_M1_LINEAR") == "1":
+    from flux2_m1_bf16_linear import install_patch as install_m1_linear_patch
+    install_m1_linear_patch()
+    print("[linear patch] enabled custom M=1 BF16 linear kernel")
+
+try:
+    from diffusers import Flux2KleinPipeline
+except ImportError:
+    flux2_site_packages = '/home/chihmin/models-work/flux2/.venv-rocm72/lib/python3.12/site-packages'
+    if flux2_site_packages not in sys.path and os.path.exists(flux2_site_packages):
+        sys.path.append(flux2_site_packages)
+    from diffusers import Flux2KleinPipeline
 from PIL import Image, ImageOps
 
 MODEL_ID_4B = "black-forest-labs/FLUX.2-klein-4B"
@@ -111,6 +166,56 @@ def resolve_flux_sizes(model_label: str, aspect_ratio: str | None, native: bool 
     return gen_w, gen_h, final_w, final_h, aspect
 
 
+def resolve_flux_aspect_ratio(aspect_ratio: str | None, image_path: str | None) -> str | None:
+    if aspect_ratio:
+        return aspect_ratio
+    if image_path:
+        try:
+            with Image.open(image_path) as img:
+                w, h = img.size
+                return "3:2" if w >= h else "2:3"
+        except Exception:
+            pass
+    return aspect_ratio
+
+
+def strip_film_keywords(prompt: str) -> str:
+    if not prompt:
+        return ""
+
+    text = prompt
+    film_terms = [
+        "analog film", "film grain", "film camera", "fujifilm", "filmic", "disposable camera",
+        "底片風", "膠卷", "胶卷", "菲林", "膠片", "胶片", "底片", "fuji", "analog", "35mm",
+        "highlights", "highlight", "strong light", "bright light", "harsh light", "hard light",
+        "strong highlights", "blown highlights", "overexposed", "over exposure", "overexposure",
+        "強光", "強烈光", "高光", "過曝", "爆光", "硬光", "強烈對比", "高對比",
+    ]
+
+    for term in sorted(film_terms, key=len, reverse=True):
+        if any(ord(ch) > 127 for ch in term):
+            text = text.replace(term, " ")
+        else:
+            text = re.sub(re.escape(term), " ", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"[，,、;:]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,，、;:")
+    return text
+
+
+def _cover_resize(img: Image.Image, w: int, h: int) -> Image.Image:
+    src_ar, dst_ar = img.width / img.height, w / h
+    if src_ar > dst_ar:
+        nh = h
+        nw = round(h * src_ar)
+    else:
+        nw = w
+        nh = round(w / src_ar)
+    img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    return img.crop((left, top, left + w, top + h))
+
+
 def should_try_daemon(args, model_label: str) -> bool:
     # Warm daemon is DISABLED by default: keeping FLUX.2 9B resident alongside
     # other local models (qwen-mtp, ComfyUI/Anima) OOMs the box. Opt back in with
@@ -181,6 +286,9 @@ def main():
                         help="Force the FLUX.2 backend even when --anime is given.")
     parser.add_argument("--loras", default=None,
                         help="Anime: explicit LoRA chain 'name:strength,name2:strength2' (Anima-base LoRAs only). Overrides the auto chain.")
+    parser.add_argument("--refcontrol", "--restyle", action="store_true", help="Force RefControl structure-locked restyle flow")
+    parser.add_argument("--refcontrol-scale", type=float, default=1.0, help="RefControl depth LoRA weight")
+    parser.add_argument("--film", "--analog", "--fuji", action="store_true", help="Force the Analog Redmond film LoRA")
     args = parser.parse_args()
 
     # Anime/二次元 requests go to the ComfyUI + Anima backend, not FLUX.2.
@@ -196,19 +304,48 @@ def main():
         model_id = MODEL_ID_9B_KV
         model_label = "9b-kv"
 
+    # Film auto-trigger & RefControl determination
+    FILM_KEYWORDS = [
+        "analog film", "film grain", "film camera", "fuji", "fujifilm", "富士",
+        "底片", "膠卷", "胶卷", "菲林", "膠片", "胶片", "analog", "35mm", "filmic", "disposable camera"
+    ]
+    prompt_lower = args.prompt.lower() if args.prompt else ""
+    has_film_keyword = any(k in prompt_lower for k in FILM_KEYWORDS)
+
+    use_refcontrol = False
+    if is_edit:
+        if args.refcontrol or (has_film_keyword and not args.no_auto_lora):
+            use_refcontrol = True
+
+    is_film = False
+    if args.film or (has_film_keyword and not args.no_auto_lora):
+        is_film = True
+
+    # Adjust lora_scale default for refcontrol mode
+    lora_scale = args.lora_scale
+    if use_refcontrol and lora_scale == 0.8:
+        lora_scale = 0.55
+
+    requested_aspect_ratio = resolve_flux_aspect_ratio(args.aspect_ratio, args.image if is_edit else None)
     gen_w, gen_h, final_w, final_h, aspect_ratio = resolve_flux_sizes(
-        model_label, args.aspect_ratio, native=args.native_1080p)
+        model_label, requested_aspect_ratio, native=args.native_1080p)
     if args.output_size:
         final_w, final_h = parse_size(args.output_size)
 
-    if args.output_size:
-        mode = ("edit-" if is_edit else "") + f"{model_label}-custom-{args.output_size}"
-    elif args.native_1080p:
-        mode = ("edit-" if is_edit else "") + f"{model_label}-native-{aspect_ratio.replace(':', 'x')}"
-    elif model_label == "4b":
-        mode = ("edit-" if is_edit else "") + f"4b-fast-preview-{aspect_ratio.replace(':', 'x')}"
+    # Adjust mode label for logging
+    if use_refcontrol:
+        mode_prefix = "refcontrol-film-" if is_film else "refcontrol-restyle-"
     else:
-        mode = ("edit-" if is_edit else "") + f"9b-default-{aspect_ratio.replace(':', 'x')}-upscale"
+        mode_prefix = "edit-" if is_edit else ""
+
+    if args.output_size:
+        mode = mode_prefix + f"{model_label}-custom-{args.output_size}"
+    elif args.native_1080p:
+        mode = mode_prefix + f"{model_label}-native-{aspect_ratio.replace(':', 'x')}"
+    elif model_label == "4b":
+        mode = mode_prefix + f"4b-fast-preview-{aspect_ratio.replace(':', 'x')}"
+    else:
+        mode = mode_prefix + f"9b-default-{aspect_ratio.replace(':', 'x')}-upscale"
 
     ref_w, ref_h = FAST_REFERENCE_SIZE
     seed = args.seed if args.seed is not None else int(time.time()) % (2**31)
@@ -236,6 +373,35 @@ def main():
     os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
 
     timings = {}
+
+    # RefControl Depth generation (run before loading FLUX model to optimize GPU memory)
+    ref_cond = None
+    depth_cond = None
+    if use_refcontrol:
+        print("[create-image] Running Depth Estimation for RefControl...")
+        t_depth = time.perf_counter()
+        from transformers import pipeline as transformer_pipeline
+        depth_pipe = transformer_pipeline("depth-estimation", model="depth-anything/Depth-Anything-V2-Large-hf", device="cuda")
+        src_img = ImageOps.exif_transpose(Image.open(args.image)).convert("RGB")
+        depth_out = depth_pipe(src_img)
+        depth_img = depth_out["depth"]
+        
+        # Save depth map
+        depth_path = out_dir / f"{prefix}_depth.png"
+        depth_img.save(depth_path)
+        
+        # Crop reference and depth images to generation size
+        ref_cond = _cover_resize(src_img, gen_w, gen_h)
+        depth_cond = _cover_resize(depth_img, gen_w, gen_h)
+        
+        # Clean up depth pipe
+        del depth_pipe
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        timings["depth_estimation_seconds"] = time.perf_counter() - t_depth
+        print(f"[create-image] Depth map generated in {timings['depth_estimation_seconds']:.2f}s")
+
     t0 = time.perf_counter()
     pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
     sync(); timings["load_pipeline_seconds"] = time.perf_counter() - t0
@@ -244,26 +410,66 @@ def main():
     pipe = pipe.to("cuda")
     sync(); timings["move_to_gpu_seconds"] = time.perf_counter() - t
 
+    # Load LoRAs
+    loras_loaded = []
+    adapters = []
+    weights = []
+    
+    if use_refcontrol:
+        refcontrol_lora = "/home/chihmin/models-work/flux2/loras/refcontrol_klein9b_depth.safetensors"
+        if os.path.exists(refcontrol_lora):
+            pipe.load_lora_weights(refcontrol_lora, adapter_name="refcontrol")
+            adapters.append("refcontrol")
+            weights.append(args.refcontrol_scale)
+            loras_loaded.append(f"refcontrol:{args.refcontrol_scale}")
+            
+    if is_film:
+        analog_lora = "/home/chihmin/models-work/flux2/loras/analog_redmond_fluxklein9b.safetensors"
+        if os.path.exists(analog_lora):
+            pipe.load_lora_weights(analog_lora, adapter_name="analog")
+            adapters.append("analog")
+            weights.append(lora_scale)
+            loras_loaded.append(f"analog:{lora_scale}")
+            
+    if adapters:
+        pipe.set_adapters(adapters, adapter_weights=weights)
+        print(f"[create-image] Loaded LoRAs: {', '.join(loras_loaded)}")
+
     reference_image = None
-    if is_edit:
+    if is_edit and not use_refcontrol:
         src = ImageOps.exif_transpose(Image.open(args.image)).convert("RGB")
         src_fit = ImageOps.contain(src, (ref_w, ref_h), Image.Resampling.LANCZOS)
         reference_image = Image.new("RGB", (ref_w, ref_h), (245, 240, 232))
         reference_image.paste(src_fit, ((ref_w - src_fit.width) // 2, (ref_h - src_fit.height) // 2))
 
+    # Construct prompt based on RefControl and film style rules
+    prompt = args.prompt
+    if use_refcontrol:
+        if is_film:
+            prompt = f"refcontrol, analog, AnalogRedmAF, {args.prompt}"
+        else:
+            prompt = f"refcontrol, {args.prompt}"
+    elif is_film:
+        prompt = f"analog, AnalogRedmAF, {args.prompt}"
+
+    print(f"[create-image] Prompt used: {prompt}")
+
     generator = torch.Generator(device="cuda").manual_seed(seed)
     t = time.perf_counter()
     with torch.inference_mode():
         call_kwargs = {
-            "prompt": args.prompt,
+            "prompt": prompt,
             "width": gen_w,
             "height": gen_h,
             "num_inference_steps": args.steps,
             "guidance_scale": args.guidance_scale,
             "generator": generator,
         }
-        if reference_image is not None:
+        if use_refcontrol:
+            call_kwargs["image"] = [ref_cond, depth_cond]
+        elif reference_image is not None:
             call_kwargs["image"] = reference_image
+            
         image = pipe(**call_kwargs).images[0]
     sync(); timings["generate_seconds"] = time.perf_counter() - t
 
@@ -294,15 +500,20 @@ def main():
         "fast_preview": args.fast_preview,
         "native_1080p": args.native_1080p,
         "mode": mode,
-        "prompt": args.prompt,
+        "prompt": prompt,
         "seed": seed,
         "steps": args.steps,
         "guidance_scale": args.guidance_scale,
         "generated_size": [gen_w, gen_h],
         "aspect_ratio": aspect_ratio,
-        "reference_size": [ref_w, ref_h] if is_edit else None,
+        "reference_size": [ref_w, ref_h] if (is_edit and not use_refcontrol) else None,
         "final_size": [final_w, final_h],
         "input_image": str(Path(args.image).resolve()) if is_edit else None,
+        "refcontrol": use_refcontrol,
+        "refcontrol_scale": args.refcontrol_scale if use_refcontrol else None,
+        "film": is_film,
+        "lora_scale": lora_scale if (is_film or use_refcontrol) else None,
+        "loras_loaded": loras_loaded,
         "torch": torch.__version__,
         "hip": getattr(torch.version, "hip", None),
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,

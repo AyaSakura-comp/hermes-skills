@@ -1,3 +1,14 @@
+---
+name: tw-product
+description: 搜尋 MIT 生活指南 網站，找出符合用戶查詢的台灣製造品牌。
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [taiwan, mit, product, search]
+---
+
 # tw-product — 搜尋 MIT 台灣製造品牌
 
 搜尋 [MIT 生活指南](https://mit-products.vercel.app/) 網站，找出符合用戶查詢的台灣製造品牌。

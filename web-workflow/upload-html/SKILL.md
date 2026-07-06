@@ -1,3 +1,14 @@
+---
+name: upload-html
+description: 將 HTML 檔案（或整個靜態網站目錄）發布到 GitHub；最終回傳 raw.githack.com 可存取的公開網址。
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [github, html, upload, static-site]
+---
+
 # Upload HTML — GitHub-backed 靜態網頁發布
 
 將 HTML 檔案（或整個靜態網站目錄）發布到 GitHub；預設直接推到 `git@github.com:AyaSakura-comp/TempHtml.git`，如果使用者已經有其他 repo 權限，也可以指定那個 repo。最終回傳 `raw.githack.com` 可存取的公開網址。

@@ -1,6 +1,9 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+
+from PIL import Image
 
 CREATE_IMAGE_SCRIPT = Path('/home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py')
 ANIMA_SCRIPT = Path('/home/chihmin/.pi/agent/skills/create-image/scripts/anima.py')
@@ -41,6 +44,27 @@ class AspectRatioTests(unittest.TestCase):
             mod.resolve_flux_sizes('9b-kv', None, native=False),
             (1360, 768, 1920, 1080, '16:9'),
         )
+
+    def test_flux_edit_without_aspect_uses_3x2_for_landscape_source(self):
+        mod = load_module(CREATE_IMAGE_SCRIPT, 'create_image')
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / 'landscape.jpg'
+            Image.new('RGB', (4032, 3024), 'orange').save(image_path)
+            self.assertEqual(mod.resolve_flux_aspect_ratio(None, str(image_path)), '3:2')
+
+    def test_flux_edit_without_aspect_uses_2x3_for_portrait_source(self):
+        mod = load_module(CREATE_IMAGE_SCRIPT, 'create_image')
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / 'portrait.jpg'
+            Image.new('RGB', (3024, 4032), 'orange').save(image_path)
+            self.assertEqual(mod.resolve_flux_aspect_ratio(None, str(image_path)), '2:3')
+
+    def test_flux_edit_preserves_explicit_aspect_ratio(self):
+        mod = load_module(CREATE_IMAGE_SCRIPT, 'create_image')
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / 'portrait.jpg'
+            Image.new('RGB', (3024, 4032), 'orange').save(image_path)
+            self.assertEqual(mod.resolve_flux_aspect_ratio('16:9', str(image_path)), '16:9')
 
 
 if __name__ == '__main__':

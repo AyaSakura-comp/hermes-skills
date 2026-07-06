@@ -27,6 +27,9 @@ STEPS=""              # optional override of stage-1 steps
 QUANTIZATION="fp8-cast" # default lower-memory transformer weight quantization; empty = bf16/no quant
 FLASH=1               # AOTriton flash attention on by default
 OFFLOAD=""            # none|cpu|disk
+CHUNK_SECONDS=5       # auto-split clips longer than this into segments (0 = never split)
+SMOOTH_CHUNKS=1       # 1 = multi-keyframe overlap continuation for long clips; 0 = old last-frame chunks
+OVERLAP_SECONDS=1     # smooth chunk overlap/keyframe span in seconds
 AUDIO=1              # 1 = synced audio (vocoder on CPU, nearly free); 0 = silent (--no-audio)
 LORA_PATH=""         # path to a .safetensors LoRA file
 LORA_STRENGTH="1.0"  # LoRA strength (default 1.0)
@@ -57,6 +60,12 @@ Options:
       --quantization MODE  fp8-cast|fp8-scaled-mm|bf16|none (default: fp8-cast).
       --bf16            Disable quantization; run weights in bf16/no-quant mode.
       --offload MODE    none|cpu|disk — lower GPU memory (default: none).
+      --chunk-seconds N Auto-split clips longer than N sec into segments. Default 5;
+                        use 0 to disable. Long clips default to smooth multi-keyframe
+                        continuation for better seams.
+      --smooth-chunks   Use multi-keyframe overlap continuation for long clips (default).
+      --fast-chunks     Use old faster last-frame chunking instead of smooth overlap.
+      --overlap-seconds N  Smooth chunk overlap/keyframe span in seconds (default 1).
       --audio           Synced audio on (default; vocoder runs on CPU, nearly free).
       --no-audio        Silent video (skip the vocoder entirely).
       --no-flash        Disable flash attention (use plain SDPA).
@@ -99,6 +108,10 @@ while [[ $# -gt 0 ]]; do
     --quantization)  QUANTIZATION="$2"; shift 2;;
     --bf16)          QUANTIZATION=""; shift;;
     --offload)       OFFLOAD="$2"; shift 2;;
+    --chunk-seconds) CHUNK_SECONDS="$2"; shift 2;;
+    --smooth-chunks) SMOOTH_CHUNKS=1; shift;;
+    --fast-chunks)   SMOOTH_CHUNKS=0; shift;;
+    --overlap-seconds) OVERLAP_SECONDS="$2"; shift 2;;
     --audio)         AUDIO=1; shift;;
     --no-audio)      AUDIO=0; shift;;
     --no-flash)      FLASH=0; shift;;
@@ -144,33 +157,43 @@ NUM_FRAMES=$(awk -v d="$DURATION" -v f="$FPS" 'BEGIN{ n=d*f; k=int((n-1)/8+0.5);
 [[ -z "$OUTPUT" ]] && OUTPUT="./video_$(date +%Y%m%d_%H%M%S).mp4"
 mkdir -p "$(dirname "$OUTPUT")"
 
+# --- chunking decision ---------------------------------------------------------
+# Long clips OOM on this APU: attention is quadratic in frame count, memory is unified
+# GTT, and earlyoom kills processes at the 3GB-free floor. So split long clips.
+# Default smooth mode overlaps chunks by OVERLAP_SECONDS and anchors the next chunk's
+# first second with multiple keyframes from the previous chunk. --fast-chunks keeps
+# the old quicker behaviour: one last-frame condition per chunk, then concat.
+NUM_CHUNKS=1
+if [[ "$CHUNK_SECONDS" != "0" ]]; then
+  if [[ "$SMOOTH_CHUNKS" -eq 1 ]]; then
+    NUM_CHUNKS=$(awk -v d="$DURATION" -v c="$CHUNK_SECONDS" -v o="$OVERLAP_SECONDS" 'BEGIN{
+      step=c-o; if(step<=0){step=c}
+      if(d<=c){n=1}else{n=int(((d-c)+step-0.000001)/step)+1}
+      if(n<1)n=1; print n
+    }')
+  else
+    NUM_CHUNKS=$(awk -v d="$DURATION" -v c="$CHUNK_SECONDS" 'BEGIN{ n=int((d+c-1)/c); if(n<1)n=1; print n }')
+  fi
+fi
+
 echo ">> create-video"
 echo "   prompt    : $PROMPT"
 echo "   image     : ${IMAGE_PATH:-none}${IMAGE_PATH:+ (frame=$IMAGE_FRAME strength=$IMAGE_STRENGTH${IMAGE_CRF:+ crf=$IMAGE_CRF})}"
 echo "   resolution: ${WIDTH}x${HEIGHT}  (aspect ${ASPECT}, hq=$HQ)"
 echo "   length    : ${DURATION}s @ ${FPS}fps -> ${NUM_FRAMES} frames"
+if [[ "$NUM_CHUNKS" -gt 1 ]]; then
+  if [[ "$SMOOTH_CHUNKS" -eq 1 ]]; then
+    echo "   chunking  : ${NUM_CHUNKS} smooth segments (<=${CHUNK_SECONDS}s each, ${OVERLAP_SECONDS}s multi-keyframe overlap)"
+  else
+    echo "   chunking  : ${NUM_CHUNKS} fast segments (<=${CHUNK_SECONDS}s each, last-frame conditioned)"
+  fi
+fi
 echo "   seed=$SEED flash=$FLASH audio=$AUDIO offload=${OFFLOAD:-none} quantization=${QUANTIZATION:-bf16} lora=${LORA_PATH:-none} -> $OUTPUT"
 
 # Always route through the skill launcher: it runs the vocoder on CPU (fast, full
 # quality). --no-audio additionally skips the vocoder via LTX_NO_AUDIO.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ "$AUDIO" -eq 0 ]] && export LTX_NO_AUDIO=1
-
-CMD=( "$PY" "$HERE/ltx_run.py"
-  --distilled-checkpoint-path "$CKPT"
-  --spatial-upsampler-path "$UPSAMPLER"
-  --gemma-root "$GEMMA"
-  --prompt "$PROMPT"
-  --height "$HEIGHT" --width "$WIDTH"
-  --num-frames "$NUM_FRAMES" --frame-rate "$FPS"
-  --seed "$SEED"
-  --output-path "$OUTPUT" )
-[[ -n "$QUANTIZATION" ]] && CMD+=( --quantization "$QUANTIZATION" )
-[[ -n "$IMAGE_PATH" ]] && CMD+=( --image "$IMAGE_PATH" "$IMAGE_FRAME" "$IMAGE_STRENGTH" )
-[[ -n "$IMAGE_PATH" && -n "$IMAGE_CRF" ]] && CMD+=( "$IMAGE_CRF" )
-[[ -n "$LORA_PATH" ]] && CMD+=( --lora "$LORA_PATH" "$LORA_STRENGTH" )
-[[ -n "$STEPS" ]]   && CMD+=( --num-inference-steps "$STEPS" )
-[[ -n "$OFFLOAD" ]] && CMD+=( --offload "$OFFLOAD" )
 
 export PYTHONUTF8=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -187,13 +210,126 @@ export MIOPEN_USER_DB_PATH="${MIOPEN_USER_DB_PATH:-$HOME/.cache/miopen-ltx}"
 export MIOPEN_CUSTOM_CACHE_DIR="$MIOPEN_USER_DB_PATH"
 mkdir -p "$MIOPEN_USER_DB_PATH"
 
+# Extra repeated --image args for smooth multi-keyframe continuation. Set by the
+# chunking loop before calling run_chunk; empty for normal one-shot and first chunks.
+EXTRA_IMAGE_ARGS=()
+
+# Run one LTX segment. Args: prompt num_frames image_path image_frame image_strength seed out
+run_chunk() {
+  local c_prompt="$1" c_frames="$2" c_img="$3" c_imgframe="$4" c_imgstr="$5" c_seed="$6" c_out="$7"
+  local -a CMD=( "$PY" "$HERE/ltx_run.py"
+    --distilled-checkpoint-path "$CKPT"
+    --spatial-upsampler-path "$UPSAMPLER"
+    --gemma-root "$GEMMA"
+    --prompt "$c_prompt"
+    --height "$HEIGHT" --width "$WIDTH"
+    --num-frames "$c_frames" --frame-rate "$FPS"
+    --seed "$c_seed"
+    --output-path "$c_out" )
+  [[ -n "$QUANTIZATION" ]] && CMD+=( --quantization "$QUANTIZATION" )
+  if [[ -n "$c_img" ]]; then
+    CMD+=( --image "$c_img" "$c_imgframe" "$c_imgstr" )
+    [[ -n "$IMAGE_CRF" ]] && CMD+=( "$IMAGE_CRF" )
+  fi
+  if [[ "${#EXTRA_IMAGE_ARGS[@]}" -gt 0 ]]; then
+    CMD+=( "${EXTRA_IMAGE_ARGS[@]}" )
+  fi
+  [[ -n "$LORA_PATH" ]] && CMD+=( --lora "$LORA_PATH" "$LORA_STRENGTH" )
+  [[ -n "$STEPS" ]]   && CMD+=( --num-inference-steps "$STEPS" )
+  [[ -n "$OFFLOAD" ]] && CMD+=( --offload "$OFFLOAD" )
+  # Opt-in profiling: set LTX_ROCPROF_DIR to wrap the run in rocprofv3 (kernel trace +
+  # per-kernel stats). Adds overhead, so use a separate run, not for clean timings.
+  if [[ -n "${LTX_ROCPROF_DIR:-}" ]]; then
+    mkdir -p "$LTX_ROCPROF_DIR"
+    rocprofv3 --kernel-trace --stats --truncate-kernels -d "$LTX_ROCPROF_DIR" -- "${CMD[@]}"
+  else
+    "${CMD[@]}"
+  fi
+}
+
 cd "$LTX_DIR"
-# Opt-in profiling: set LTX_ROCPROF_DIR to wrap the run in rocprofv3 (kernel trace +
-# per-kernel stats). Adds overhead, so use a separate run, not for clean timings.
-if [[ -n "${LTX_ROCPROF_DIR:-}" ]]; then
-  mkdir -p "$LTX_ROCPROF_DIR"
-  rocprofv3 --kernel-trace --stats --truncate-kernels -d "$LTX_ROCPROF_DIR" -- "${CMD[@]}"
+
+if [[ "$NUM_CHUNKS" -le 1 ]]; then
+  run_chunk "$PROMPT" "$NUM_FRAMES" "$IMAGE_PATH" "$IMAGE_FRAME" "$IMAGE_STRENGTH" "$SEED" "$OUTPUT"
 else
-  "${CMD[@]}"
+  TMPC="$(mktemp -d)"
+  trap 'rm -rf "$TMPC"' EXIT
+  LIST="$TMPC/list.txt"; : > "$LIST"
+
+  if [[ "$SMOOTH_CHUNKS" -eq 1 ]]; then
+    # Smooth mode: each generated chunk is CHUNK_SECONDS long. Chunks after the
+    # first are anchored with multiple keyframes extracted from the previous
+    # chunk's final OVERLAP_SECONDS. When assembling, trim that overlap off each
+    # continuation chunk and trim the final result to the requested duration.
+    PER_FRAMES=$(awk -v c="$CHUNK_SECONDS" -v f="$FPS" 'BEGIN{ n=c*f; k=int((n-1)/8+0.5); if(k<1)k=1; print k*8+1 }')
+    prev_seg=""
+    for ((c=1; c<=NUM_CHUNKS; c++)); do
+      seg="$TMPC/seg_$(printf '%02d' "$c").mp4"
+      EXTRA_IMAGE_ARGS=()
+      chunk_img=""; chunk_frame=0; chunk_strength="$IMAGE_STRENGTH"
+
+      if [[ "$c" -eq 1 && -n "$IMAGE_PATH" ]]; then
+        chunk_img="$IMAGE_PATH"; chunk_frame="$IMAGE_FRAME"; chunk_strength="$IMAGE_STRENGTH"
+      elif [[ "$c" -gt 1 ]]; then
+        # Extract four keyframes from the previous chunk's overlap region and
+        # pin them to frames 0/8/16/24 of the current chunk. CRF 0 keeps the
+        # conditioning images lossless.
+        for spec in 0 8 16 24; do
+          ref="$TMPC/ref_$(printf '%02d' "$c")_${spec}.png"
+          t=$(awk -v csec="$CHUNK_SECONDS" -v o="$OVERLAP_SECONDS" -v idx="$spec" -v fps="$FPS" 'BEGIN{
+            start=csec-o; if(start<0)start=0;
+            if(idx==24){dt=o-(1/fps)} else {dt=(idx/24.0)*o}
+            printf "%.6f", start+dt
+          }')
+          ffmpeg -nostdin -loglevel error -y -ss "$t" -i "$prev_seg" -frames:v 1 "$ref"
+          EXTRA_IMAGE_ARGS+=( --image "$ref" "$spec" 0.95 0 )
+        done
+      fi
+
+      echo ">> [smooth chunk $c/$NUM_CHUNKS] frames=$PER_FRAMES images=$([[ "$c" -gt 1 ]] && echo multi-keyframe || echo "${chunk_img:-none}") seed=$((SEED + c - 1))"
+      run_chunk "$PROMPT" "$PER_FRAMES" "$chunk_img" "$chunk_frame" "$chunk_strength" "$((SEED + c - 1))" "$seg"
+
+      if [[ "$c" -eq 1 ]]; then
+        printf "file '%s'\n" "$seg" >> "$LIST"
+      else
+        trimmed="$TMPC/trim_$(printf '%02d' "$c").mp4"
+        ffmpeg -nostdin -loglevel error -y -ss "$OVERLAP_SECONDS" -i "$seg" \
+          -map 0:v:0 -map 0:a:0? \
+          -c:v libx264 -pix_fmt yuv420p -crf 20 -preset veryfast -c:a aac -b:a 128k "$trimmed"
+        printf "file '%s'\n" "$trimmed" >> "$LIST"
+      fi
+      prev_seg="$seg"
+    done
+
+    joined="$TMPC/joined.mp4"
+    if ! ffmpeg -nostdin -loglevel error -y -f concat -safe 0 -i "$LIST" -c copy "$joined"; then
+      echo ">> stream-copy concat failed; re-encoding" >&2
+      ffmpeg -nostdin -loglevel error -y -f concat -safe 0 -i "$LIST" \
+        -map 0:v:0 -map 0:a:0? -c:v libx264 -crf 20 -pix_fmt yuv420p -preset veryfast -c:a aac -b:a 128k "$joined"
+    fi
+    ffmpeg -nostdin -loglevel error -y -t "$DURATION" -i "$joined" \
+      -map 0:v:0 -map 0:a:0? -c:v libx264 -crf 20 -pix_fmt yuv420p -preset veryfast -c:a aac -b:a 128k "$OUTPUT"
+  else
+    # Fast legacy mode: split total frames evenly, seed each next chunk from the
+    # previous chunk's last frame, then concatenate.
+    PER_FRAMES=$(awk -v d="$DURATION" -v f="$FPS" -v n="$NUM_CHUNKS" 'BEGIN{ per=(d*f)/n; k=int((per-1)/8+0.5); if(k<1)k=1; print k*8+1 }')
+    cur_img="$IMAGE_PATH"; cur_frame="$IMAGE_FRAME"; cur_str="$IMAGE_STRENGTH"
+    for ((c=1; c<=NUM_CHUNKS; c++)); do
+      seg="$TMPC/seg_$(printf '%02d' "$c").mp4"
+      EXTRA_IMAGE_ARGS=()
+      echo ">> [fast chunk $c/$NUM_CHUNKS] frames=$PER_FRAMES image=${cur_img:-none} seed=$((SEED + c - 1))"
+      run_chunk "$PROMPT" "$PER_FRAMES" "$cur_img" "$cur_frame" "$cur_str" "$((SEED + c - 1))" "$seg"
+      printf "file '%s'\n" "$seg" >> "$LIST"
+      if [[ "$c" -lt "$NUM_CHUNKS" ]]; then
+        cur_img="$TMPC/last_$(printf '%02d' "$c").png"
+        ffmpeg -nostdin -loglevel error -y -sseof -1 -i "$seg" -update 1 -q:v 2 "$cur_img"
+        cur_frame=0; cur_str="0.9"
+      fi
+    done
+    if ! ffmpeg -nostdin -loglevel error -y -f concat -safe 0 -i "$LIST" -c copy "$OUTPUT"; then
+      echo ">> stream-copy concat failed; re-encoding" >&2
+      ffmpeg -nostdin -loglevel error -y -f concat -safe 0 -i "$LIST" -c:v libx264 -crf 18 -pix_fmt yuv420p -c:a aac "$OUTPUT"
+    fi
+  fi
 fi
 echo ">> done: $OUTPUT"

@@ -1,3 +1,14 @@
+---
+name: html-screenshot
+description: Generate full-page screenshots of HTML files when browser_vision or the Hermes browser tool times out on local Chrome.
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [html, screenshot, browser, playwright]
+---
+
 # html-screenshot
 
 Generate full-page screenshots of HTML files when `browser_vision` or the Hermes browser tool times out on local Chrome.

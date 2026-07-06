@@ -1,3 +1,14 @@
+---
+name: open-webui-auth
+description: Change Open WebUI authentication settings (enable/disable login requirement).
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [open-webui, auth, docker]
+---
+
 # Open WebUI Authentication Management
 
 Change Open WebUI authentication settings (enable/disable login requirement).
