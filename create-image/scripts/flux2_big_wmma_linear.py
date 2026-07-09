@@ -124,8 +124,8 @@ def _can_use_big_wmma(input: torch.Tensor, weight: torch.Tensor, bias) -> bool:
     
     # Target only the specific large shapes to ensure the GOMEA-tuned configuration matches.
     # Shape 1: M=12168, K=4096, N=4096
-    # Shape 2: M=12680, K=16384, N=4096
-    return (m == 12168 and k == 4096 and n == 4096) or (m == 12680 and k == 16384 and n == 4096)
+    # Shape 2: M=12680, K=16384, N=4096 (Temporarily disabled due to illegal memory access)
+    return (m == 12168 and k == 4096 and n == 4096)
 
 def big_wmma_linear(input: torch.Tensor, weight: torch.Tensor, bias=None) -> torch.Tensor:
     original_shape = input.shape[:-1]
