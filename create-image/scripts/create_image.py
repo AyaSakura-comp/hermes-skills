@@ -33,8 +33,13 @@ if os.environ.get("CREATE_IMAGE_NO_CONTIG") != "1":
             kwargs['key'] = kwargs['key'].contiguous()
         if 'value' in kwargs:
             kwargs['value'] = kwargs['value'].contiguous()
-            
+
         return orig_sdpa(*args, **kwargs)
+    # NB: this assignment was missing, so the patch above was dead code and
+    # every FLUX.2 attention ran on the non-contiguous q/k/v that diffusers'
+    # attention_dispatch produces via permute(0,2,1,3) — 6× slower on AOTriton
+    # flash. Installing it cuts RefControl generate ~88s→~40s (bit-exact).
+    torch.nn.functional.scaled_dot_product_attention = patched_sdpa
 # Patch linear to trace shapes
 if os.environ.get("TRACE_LINEAR_SHAPES") == "1":
     orig_linear = torch.nn.functional.linear
