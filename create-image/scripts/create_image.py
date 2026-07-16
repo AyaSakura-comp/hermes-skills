@@ -114,6 +114,30 @@ def sync():
         torch.cuda.synchronize()
 
 
+def fast_to_cuda(pipe):
+    """UMA-aware GPU move. Default `.to("cuda")` copies weights from PAGEABLE
+    host memory through ROCm's slow bounce path (~6-7 GB/s) and faults the mmap
+    pages one-by-one *during* the copy. Copying each tensor via pinned memory
+    hits the GTT bandwidth ceiling (~19 GB/s) and materializes cleanly — measured
+    ~16.4s -> ~10.3s for FLUX.2 9B on gfx1151. Falls back to plain .to on error.
+    Disable with CREATE_IMAGE_FAST_LOAD=0."""
+    try:
+        for comp in pipe.components.values():
+            if not isinstance(comp, torch.nn.Module):
+                continue
+            for _, p in list(comp.named_parameters(recurse=True)):
+                if p.device.type != "cuda":
+                    p.data = p.data.pin_memory().to("cuda", non_blocking=True)
+            for _, b in list(comp.named_buffers(recurse=True)):
+                if b is not None and b.numel() > 0 and b.device.type != "cuda":
+                    b.data = b.data.pin_memory().to("cuda", non_blocking=True)
+        torch.cuda.synchronize()
+        return pipe
+    except Exception as exc:
+        print(f"[create-image] fast_to_cuda failed ({exc}); using plain .to(cuda)", flush=True)
+        return pipe.to("cuda")
+
+
 def save_json(path: Path, payload: dict):
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -412,7 +436,10 @@ def main():
     sync(); timings["load_pipeline_seconds"] = time.perf_counter() - t0
 
     t = time.perf_counter()
-    pipe = pipe.to("cuda")
+    if os.environ.get("CREATE_IMAGE_FAST_LOAD", "1") == "1":
+        pipe = fast_to_cuda(pipe)
+    else:
+        pipe = pipe.to("cuda")
     sync(); timings["move_to_gpu_seconds"] = time.perf_counter() - t
 
     # Load LoRAs
