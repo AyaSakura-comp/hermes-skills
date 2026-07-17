@@ -50,6 +50,19 @@ One-liner form (no separate activate) also works:
 
 Everything below is reference detail; the commands above are all you need to run it.
 
+### Mandatory prompt research — ALWAYS search first
+
+**Before every image-generation request, web-search the user prompt to understand and verify what it
+refers to — even when it appears familiar or generic.** Do this before choosing a backend or writing the
+final generation prompt. Search names, characters, franchises, locations, events, products, memes,
+slang, styles, and any other potentially meaningful terms. Use authoritative sources where available and
+inspect relevant reference imagery when the request concerns a character or identifiable subject.
+
+- Do not assume a spelling, translation, identity, visual design, age, setting, or intended meaning.
+- Use the results to write a grounded, detailed generation prompt; if reliable sources disagree or are
+  insufficient, say so and ask the user rather than inventing specifics.
+- This requirement applies to **all** prompts, not only named-character requests or unfamiliar words.
+
 ---
 
 Generate or edit images with the local FLUX.2 deployment:
@@ -95,21 +108,21 @@ commands). Scripts: `scripts/create_image.py` (entry), `scripts/anima.py` (anime
 - `CREATE_IMAGE_USE_DAEMON` — leave UNSET. Set to `1` only to opt back into the warm daemon (disabled
   by default, OOM risk — see "Warm daemon" below).
 
-### Anime backend (`--anime`: ComfyUI + Anima)
+### Anime backend (`--anime`: on-demand ComfyUI + Anima)
 - ComfyUI repo `/home/chihmin/src/ComfyUI`, venv `.venv`, HTTP API on `http://127.0.0.1:8188`.
   **Already installed; do NOT reinstall ComfyUI or its deps, and do NOT download the Anima models.**
+  It is a per-request worker, **not a permanent service**: do not create, enable, or leave a systemd/service process for Anima.
 - Installed in ComfyUI's `.venv` (verified): `torch 2.11.0+rocm7.2` (HIP 7.2.26015),
   `torchvision 0.26.0+rocm7.2`, `triton-rocm 3.6.0`, `safetensors 0.8.0`, `pillow 12.2.0`, plus the
   full ComfyUI `requirements.txt`. Uses ONLY built-in ComfyUI nodes (no custom nodes needed).
 - The anime path in `anima.py` talks to ComfyUI over HTTP (it builds the node graph as JSON and POSTs
   to `/prompt`); it imports only `urllib` + `PIL`, NOT torch — so it runs fine from the FLUX venv.
-- **You do NOT start ComfyUI manually** — `anima.py` auto-starts it (detached, from ComfyUI's own
-  venv) if `:8188` isn't up, and waits until ready. The anime path itself only needs `urllib`+`PIL`,
-  so it runs fine from the FLUX `.venv-rocm72` (i.e. the same activate step above works for `--anime`).
-- Manual ComfyUI start, only if ever needed:
-  ```bash
-  cd /home/chihmin/src/ComfyUI && .venv/bin/python main.py --listen 127.0.0.1 --port 8188
-  ```
+- **You do NOT start ComfyUI manually or as a service.** `anima.py` starts it on demand from
+  ComfyUI's own venv when `:8188` is unavailable, waits until ready, then terminates the process it
+  started in a `finally` block as soon as that image request finishes (success, error, or timeout).
+  If another process already owns `:8188`, the script uses but never stops it. The anime path itself
+  only needs `urllib`+`PIL`, so it runs fine from the FLUX `.venv-rocm72` (i.e. the same activate step
+  above works for `--anime`).
 - Anima model files (already downloaded, fixed locations under `ComfyUI/models/`):
   `diffusion_models/anima_baseV10.safetensors`, `text_encoders/anima_baseV10_txt.safetensors`,
   `vae/qwen_image_vae.safetensors`, `loras/gpt-image-2_anima-base1_v1-1.safetensors`. Additional artist-style LoRAs:
@@ -177,8 +190,9 @@ python ~/.hermes/skills/create-image/scripts/create_image.py \
   --steps 2
 ```
 
-Perf note from the cat-photo regression sample (`832x1248 → 1184x1776`, RefControl + Analog LoRA):
-`--steps 2` is about 108s end-to-end / 90s warm generate; default `--steps 4` is about 193s end-to-end.
+Perf note (`832x1248 → 1184x1776`, RefControl + Analog LoRA), after the 2026-07-16 SDPA + fast-load
+fixes: `--steps 2` is about **54s end-to-end / ~40s generate** (was ~108s/90s before the fixes);
+`--steps 4` roughly doubles the generate portion.
 
 ### Color tone / 色調 in the prompt
 
@@ -250,18 +264,12 @@ python ~/.hermes/skills/create-image/scripts/create_image.py "<style direction>"
 - **Conditioning** = `image=[reference, depth]` (FLUX.2 native multi-reference); both resize-then-cropped to the gen bucket (aspect from the photo's orientation: vertical→2:3, horizontal→3:2).
 - **Prompt assembled automatically** = `refcontrol, analog, AnalogRedmAF, <your style words>, ` + the tuned grade `deep shadows, natural color with slight desaturation, crisp sharp rendering, fine grain, editorial mood`. So you only pass the *style direction*; triggers + grade are added for you.
 - **Steps** = `--steps` or **5** by default (klein is few-step distilled; 5 ≈ 20-step quality). **9B only** (4B has no matching LoRA; `--fast-preview` is ignored here).
-- **Env set by the script**: `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` (AOTriton flash — **REQUIRED**; without it the dual-reference attention materializes the N² matrix → OOM / ~30 min), `MIOPEN_FIND_MODE=FAST` + persistent `MIOPEN_USER_DB_PATH=~/.cache/miopen-flux2` (VAE convs), `HF_XET_HIGH_PERFORMANCE=1`.
-- **Custom Tuned wmma Linear Kernel acceleration**: Prepended environment variable `FLUX2_BIG_WMMA_LINEAR=1` is **REQUIRED** to enable the custom GOMEA-tuned `v_wmma` BF16 linear kernel (specifically optimizing the huge `12168, 4096, 4096` matrix shape). Without it, PyTorch runs default Tensile, which is slightly slower.
-- **Global contiguous-SDPA patch** (top of `create_image.py`, applies to ALL FLUX.2 runs): forces q/k/v
-  `.contiguous()` before SDPA because AOTriton `attn_fwd` is ~2.5× slower on the non-contiguous tensors
-  diffusers passes. **Bit-exact** (verified max|Δ|=0; dual-ref step 38.4 s→14.8 s). Disable with
-  `CREATE_IMAGE_NO_CONTIG=1`.
+- **Env set by the script**: `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` (AOTriton flash — **REQUIRED**; without it the dual-reference attention materializes the N² matrix → OOM / ~30 min) and `HF_XET_HIGH_PERFORMANCE=1`, both via `setdefault`. It **disables MIOpen** (`torch.backends.cudnn.enabled = False`) — the heavy work is transformer GEMM+attention, not conv, so MIOpen's find/autotune is pure overhead here; re-enable with `DISABLE_MIOPEN=0`. (It does NOT set `MIOPEN_FIND_MODE`/`MIOPEN_USER_DB_PATH` — an earlier version of this doc claimed it did; that was wrong.)
+- **Custom Tuned wmma Linear Kernel acceleration**: Prepended environment variable `FLUX2_BIG_WMMA_LINEAR=1` enables the custom GOMEA-tuned `v_wmma` BF16 linear kernel for the huge `12168/12680, 4096` matrix shapes. Measured effect on the fuji RefControl shape: linear 18.5 s → 17.3 s (~1.3 s, ~1 % end-to-end) — small; attention, not GEMM, dominates (see below). Keep it on but it is not the lever.
+- **Global contiguous-SDPA patch** (`create_image.py`, applies to ALL FLUX.2 runs): forces q/k/v `.contiguous()` before SDPA. diffusers' `attention_dispatch` does `permute(0,2,1,3)` right before SDPA → q/k/v arrive **non-contiguous**, and AOTriton flash is **~6× slower** on them (141 ms vs 862 ms/call at Sq=12680). **⚠️ This patch was dead code until 2026-07-16** (the `torch.nn.functional.scaled_dot_product_attention = patched_sdpa` install line was missing); once installed, RefControl **generate 88 s → 40 s** (SDPA 62 s → 10 s), **bit-exact**. Disable with `CREATE_IMAGE_NO_CONTIG=1`.
+- **UMA fast GPU load** (`fast_to_cuda`, default on): replaces `pipe.to("cuda")` with per-tensor **pinned-memory** copies. Plain `.to("cuda")` copies weights from pageable host memory through ROCm's slow bounce path (~7 GB/s) and faults the mmap during the copy; pinned hits the GTT ceiling (~19 GB/s). Measured **move 18 s → 8.7 s** (2×) for FLUX.2 9B. Falls back to plain `.to` on error; disable with `CREATE_IMAGE_FAST_LOAD=0`. (Note on UMA: cold start is copy-bound, NOT disk-bound — the ~4.5 s NVMe read is a hard floor; residency is the only way to zero it.)
 
-**Performance / memory (gfx1151):** ~**90 s** for a 5-step 832×1248 restyle. The denoiser cost is
-attention-dominated above ~6–8k tokens (dual-reference = 3× tokens ≈ 12168 → past the cliff); the
-contiguous patch is what keeps it at ~15 s/step instead of ~40 s. Coexists with `qwen-mtp` (flash keeps
-memory bounded) — **do not stop qwen for it**. If you ever run this as a detached background job, use
-`setsid` (a plain `nohup &` gets SIGKILL'd with the process group at a turn boundary).
+**Performance / memory (gfx1151, after the 2026-07-16 SDPA + fast-load fixes):** a 2-step 832×1248 RefControl restyle (fuji) is now ~**54 s** end-to-end (was ~118 s): ~8.7 s model load + ~40 s generate + depth/save. The denoiser is **attention-dominated** (76 % of generate; dual-reference = 3 concatenated image streams → Sq≈12680, quadratic), so resolution/reference count are the only remaining big levers (both trade quality). Coexists with `qwen-mtp` (flash keeps memory bounded) — **do not stop qwen for it**. If you ever run this as a detached background job, use `setsid` (a plain `nohup &` gets SIGKILL'd with the process group at a turn boundary).
 
 **Tuning:** style direction (your prompt words) drives the look; `--lora-scale` = film strength
 (0.4 subtle … 0.9 strong; default 0.55); `--refcontrol-scale` = how hard structure is locked (default
@@ -272,7 +280,9 @@ scales, and `depth_model`.
 - **Do NOT keep the FLUX warm daemon resident** and do NOT keep multiple big models loaded — it OOMs.
 - Other always-on services (`qwen-mtp.service` ~43 GB GTT, etc.) coexist with normal image gen, but
   do NOT stop/kill them for image generation.
-- ComfyUI/Anima (~6 GB GTT) is light; it can stay running between anime requests.
+- **Do not leave ComfyUI/Anima running between requests.** It retains roughly 6 GB of shared UMA
+  memory and competes with FLUX/Fuji and other local models. The create-image script automatically
+  stops only the on-demand ComfyUI process that it started after each request.
 
 ## Default mode
 
@@ -494,7 +504,8 @@ Anima specifics (fixed, no need to change):
   scheduler `simple`. Override with `--aspect-ratio`, `--steps`, `--guidance-scale` / `--lora-scale`
   if asked. cfg 5.0 is the default for stronger prompt adherence; `--guidance-scale 1` is ~2x faster
   if adherence isn't critical.
-- ComfyUI (port 8188, repo `/home/chihmin/src/ComfyUI`) is started on demand if not already running.
+- ComfyUI (port 8188, repo `/home/chihmin/src/ComfyUI`) is started on demand only for the request,
+  then stopped immediately after it; never run Anima as a persistent service.
 
 ### Anima prompting guide (official-style)
 
@@ -698,10 +709,11 @@ python /home/chihmin/.pi/agent/skills/create-image/scripts/create_image.py \
 
 Use the **Anima-base1** LoRA variants only; SDXL, Illustrious, and ZImage variants are incompatible with this backend. Note many Civitai "Anima" entries are full checkpoints rather than LoRAs (like PVC above) — those are base swaps, not chain entries.
 
-## Named character requests (search for a reference first)
+## Named character requests (mandatory research applies; search for a reference first)
 
-If the user asks for a specific named character (an anime/game/VTuber/cartoon/celebrity character —
-anything you think is a real, identifiable character), **don't rely on the prompt alone**:
+The global **Mandatory prompt research** rule above applies to every request. For a specific named
+character (anime/game/VTuber/cartoon/celebrity character — anything identifiable), **don't rely on the
+prompt alone**:
 
 > **Treat any unfamiliar proper-noun / name-like input as a POSSIBLE character.** If the prompt
 > contains a word or phrase that could be an anime/game/VTuber character name (a name you don't
@@ -774,7 +786,7 @@ runs **in-process** instead, which is reliable.
 --anime                  # anime/二次元 path: ComfyUI + Anima + @gpt-image-2 LoRA (default 2:3 portrait)
 --strength 0.5           # with --anime --image: photo->anime denoise (higher=more anime, default 0.5)
 --film                   # FLUX.2: force the Analog Redmond Fuji/analog-film LoRA (aliases --analog/--fuji; auto-on for film/底片/膠卷 prompts)
---refcontrol             # photo style-change path (alias --restyle): depth+ref lock structure + style LoRA. Needs --image. 9B, ~90s.
+--refcontrol             # photo style-change path (alias --restyle): depth+ref lock structure + style LoRA. Needs --image. 9B, ~54s.
 --refcontrol-scale 1.0   # refcontrol LoRA weight (structure adherence) for --refcontrol
 ```
 
