@@ -6,6 +6,7 @@ PUBLIC_URL="https://taigi.crayfish-monitor.ts.net"
 LOCAL_BACKEND="http://127.0.0.1:8025"
 LOCAL_TTS="http://127.0.0.1:8026"
 PY="/home/chihmin/models-work/flux2/.venv-rocm72/bin/python"
+EXPECTED_MIOPEN_FIND_MODE="FAST"
 FORCE_TTS=0; REBUILD=0; NO_UI=0
 for arg in "$@"; do
   case "$arg" in
@@ -22,18 +23,70 @@ wait_http(){ local url="$1" seconds="${2:-60}" label="${3:-$url}"; for i in $(se
 json_or_raw(){ local url="$1"; curl -sf --max-time 5 "$url" 2>/dev/null | "$PY" -m json.tool 2>/dev/null || curl -sS --max-time 5 "$url" 2>/dev/null || true; }
 ok=1
 echo "== restart-taigi =="
-section "[1/5] Breeze ASR backend supervisor (:8025)"
-cd "$BACKEND_DIR" || { echo "missing backend dir: $BACKEND_DIR"; exit 1; }
-./stop.sh >/tmp/restart-taigi-stop.log 2>&1 || true
-sed 's/^/  /' /tmp/restart-taigi-stop.log 2>/dev/null || true
-./start-bg.sh
-if wait_http "$LOCAL_BACKEND/health" 90 "backend health"; then json_or_raw "$LOCAL_BACKEND/health" | sed 's/^/      /' | head -20; else ok=0; log "recent backend log:"; tail -80 "$BACKEND_DIR/logs/server.log" 2>/dev/null | sed 's/^/      /' || true; fi
+section "[1/5] Breeze ASR backend (:8025, systemd)"
+# breeze-asr.service is the single supervisor; its drop-in Wants=ollama.service +
+# meralion-tts.service, so this one restart also brings the local model + TTS up.
+# (The old ./stop.sh + ./start-bg.sh manual supervisor is retired — running both
+# double-books :8025.)
+log "systemctl --user restart breeze-asr.service (pulls in ollama + tts)"
+systemctl --user reset-failed breeze-asr.service 2>/dev/null || true
+systemctl --user restart breeze-asr.service || ok=0
+if wait_http "$LOCAL_BACKEND/health" 90 "backend health"; then json_or_raw "$LOCAL_BACKEND/health" | sed 's/^/      /' | head -20; else ok=0; log "recent backend log:"; journalctl --user -u breeze-asr.service -n 80 --no-pager 2>/dev/null | sed 's/^/      /' || true; fi
+log "ollama.service: $(systemctl --user is-active ollama.service 2>/dev/null)"
 section "[2/5] MERaLiON / OmniVoice TTS (:8026)"
-if [[ "$FORCE_TTS" -eq 1 ]] || ! curl -sf --max-time 3 "$LOCAL_TTS/health" >/dev/null 2>&1; then
+# The default speaker prompt (samples/ref.wav) is pre-loaded ONCE at TTS startup
+# (DEFAULT_VOICE_PROMPT_BASE in meralion_server.py). A healthy-looking TTS can
+# therefore be speaking with a STALE voice after ref.wav is replaced. Detect
+# that: if ref.wav is newer than the running service, force a restart.
+TTS_REF="/home/chihmin/src/taigi-id-translator/samples/ref.wav"
+# NB: systemd prints the local abbreviation "CST", which `date -d` misreads as
+# US Central (-6) — strip the zone token and parse as local time instead.
+tts_started_epoch=$(date -d "$(systemctl --user show meralion-tts.service -p ActiveEnterTimestamp --value 2>/dev/null | sed 's/ [A-Z]\+$//')" +%s 2>/dev/null || echo 0)
+ref_mtime_epoch=$(stat -c %Y "$TTS_REF" 2>/dev/null || echo 0)
+if [[ "$ref_mtime_epoch" -gt "$tts_started_epoch" ]] && [[ "$tts_started_epoch" -gt 0 ]]; then
+  log "ref.wav is newer than the running TTS (voice would be stale) -> forcing TTS restart"
+  FORCE_TTS=1
+fi
+# Real synthesis probe. /health only confirms the model LOADED, not that it can
+# synthesize: a prior GPU launch fault can corrupt this process's HIP context so
+# /health stays green while every /synthesize returns HTTP 500 ("CUDA error:
+# unspecified launch failure"). So actually exercise synthesis, and restart on failure.
+TTS_SYNTH_ERR=""
+tts_synth_probe(){
+  local out rc=1 code; out=$(mktemp)
+  code=$(curl -s -o "$out" -w '%{http_code}' --max-time 60 -X POST "$LOCAL_TTS/synthesize" \
+    -H 'Content-Type: application/json' -d '{"text":"測試","language":"nan","num_step":6}' 2>/dev/null || echo 000)
+  if [[ "$code" == "200" ]] && head -c4 "$out" 2>/dev/null | grep -q RIFF; then rc=0
+  else TTS_SYNTH_ERR="HTTP $code $(head -c200 "$out" 2>/dev/null | tr '\n' ' ')"; fi
+  rm -f "$out"; return $rc
+}
+need_tts_restart=0
+[[ "$FORCE_TTS" -eq 1 ]] && need_tts_restart=1
+if ! curl -sf --max-time 3 "$LOCAL_TTS/health" >/dev/null 2>&1; then
+  need_tts_restart=1
+elif [[ "$need_tts_restart" -eq 0 ]]; then
+  # health up and no forced restart -> verify synthesis actually works before trusting it
+  if tts_synth_probe; then log "tts synthesis probe: OK"
+  else log "tts /health is green but SYNTHESIS FAILED ($TTS_SYNTH_ERR) -> forcing TTS restart"; need_tts_restart=1; fi
+fi
+if [[ "$need_tts_restart" -eq 1 ]]; then
   log "restarting meralion-tts.service..."; systemctl --user reset-failed meralion-tts.service 2>/dev/null || true; systemctl --user restart meralion-tts.service || true
   wait_http "$LOCAL_TTS/health" 120 "tts health" || log "TTS is still down; ASR/text translation can still work with TTS toggled off."
-else log "tts health: already healthy"; fi
+  if tts_synth_probe; then log "tts synthesis probe (post-restart): OK"
+  else log "tts synthesis STILL failing after restart: $TTS_SYNTH_ERR"; ok=0; fi
+else log "tts health: already healthy + synthesis verified (ref.wav older than service start -> voice is current)"; fi
 json_or_raw "$LOCAL_TTS/health" | sed 's/^/      /' | head -20
+tts_pid=$(systemctl --user show meralion-tts.service -p MainPID --value 2>/dev/null || true)
+tts_miopen_mode=""
+if [[ "$tts_pid" =~ ^[1-9][0-9]*$ ]] && [[ -r "/proc/$tts_pid/environ" ]]; then
+  tts_miopen_mode=$(tr '\0' '\n' <"/proc/$tts_pid/environ" | awk -F= '$1 == "MIOPEN_FIND_MODE" { print $2; exit }')
+fi
+if [[ "$tts_miopen_mode" = "$EXPECTED_MIOPEN_FIND_MODE" ]]; then
+  log "MIOpen mode: FAST (TTS PID $tts_pid)"
+else
+  log "MIOpen mode mismatch: expected $EXPECTED_MIOPEN_FIND_MODE, got ${tts_miopen_mode:-unset}"
+  ok=0
+fi
 section "[3/5] Frontend + Tailscale sidecar"
 if [[ "$NO_UI" -eq 1 ]]; then log "--no-ui set; skipping frontend/tailscale restart"; else
   cd "$FRONTEND_DIR" || { echo "missing frontend dir: $FRONTEND_DIR"; exit 1; }
@@ -67,8 +120,9 @@ except Exception as exc: print(f"      websocket: DOWN {type(exc).__name__}: {ex
 PY
 [[ "$?" -eq 0 ]] || ok=0
 section "[5/5] Runtime status"
-printf '      %-28s %s\n' "breeze supervisor" "$(cat "$BACKEND_DIR/breeze-asr.pid" 2>/dev/null || echo missing)"
+printf '      %-28s %s\n' "breeze-asr.service" "$(systemctl --user is-active breeze-asr.service 2>/dev/null || echo unknown)"
 printf '      %-28s %s\n' "breeze backend pid" "$(pgrep -f 'uvicorn app.server:app.*8025' | tr '\n' ' ' || echo missing)"
+printf '      %-28s %s\n' "ollama.service" "$(systemctl --user is-active ollama.service 2>/dev/null || echo unknown)"
 printf '      %-28s %s\n' "meralion-tts.service" "$(systemctl --user is-active meralion-tts.service 2>/dev/null || echo unknown)"
 printf '      %-28s %s\n' "breeze-asr-frontend" "$(docker inspect -f '{{.State.Status}}' breeze-asr-frontend 2>/dev/null || echo missing)"
 printf '      %-28s %s\n' "breeze-asr-tailscale-taigi" "$(docker inspect -f '{{.State.Status}}' breeze-asr-tailscale-taigi 2>/dev/null || echo missing)"

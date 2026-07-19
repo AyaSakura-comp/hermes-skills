@@ -172,11 +172,11 @@ def _server_up() -> bool:
         return False
 
 
-def ensure_comfy(wait_seconds: int = 180) -> bool:
-    """Return True if ComfyUI is reachable, starting it detached if needed."""
+def ensure_comfy(wait_seconds: int = 180) -> tuple[bool, subprocess.Popen | None]:
+    """Return readiness and a process only when this invocation started ComfyUI."""
     if _server_up():
-        return True
-    subprocess.Popen(
+        return True, None
+    process = subprocess.Popen(
         [f"{COMFY_DIR}/.venv/bin/python", "main.py", "--listen", "127.0.0.1", "--port", "8188"],
         cwd=COMFY_DIR,
         stdout=subprocess.DEVNULL,
@@ -186,9 +186,22 @@ def ensure_comfy(wait_seconds: int = 180) -> bool:
     deadline = time.time() + wait_seconds
     while time.time() < deadline:
         if _server_up():
-            return True
+            return True, process
         time.sleep(3)
-    return False
+    stop_comfy(process)
+    return False, None
+
+
+def stop_comfy(process: subprocess.Popen | None) -> None:
+    """Stop an on-demand ComfyUI process; never stop a server we did not start."""
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=15)
 
 
 def _lora_chain(loras: list) -> tuple:
@@ -294,15 +307,23 @@ def _fetch_image(info: dict) -> Image.Image:
 
 
 def run_anime(args) -> int:
-    """Generate an anime image via ComfyUI+Anima. Prints the result JSON. Returns exit code."""
-    timings = {}
+    """Generate via an on-demand ComfyUI process and release it when this job ends."""
     t_all = time.perf_counter()
-
     t = time.perf_counter()
-    if not ensure_comfy():
+    ready, owned_process = ensure_comfy()
+    ready_seconds = time.perf_counter() - t
+    if not ready:
         print(json.dumps({"error": "ComfyUI (Anima backend) did not become ready on :8188"}))
         return 1
-    timings["comfy_ready_seconds"] = time.perf_counter() - t
+    try:
+        return _run_anime_with_comfy(args, t_all, ready_seconds)
+    finally:
+        stop_comfy(owned_process)
+
+
+def _run_anime_with_comfy(args, t_all: float, ready_seconds: float) -> int:
+    """Run one job against an already-ready ComfyUI server."""
+    timings = {"comfy_ready_seconds": ready_seconds}
 
     native = bool(args.native_1080p)
     is_edit = bool(getattr(args, "image", None))

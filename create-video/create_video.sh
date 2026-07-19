@@ -59,7 +59,8 @@ Options:
       --steps N         Override stage-1 denoise steps.
       --quantization MODE  fp8-cast|fp8-scaled-mm|bf16|none (default: fp8-cast).
       --bf16            Disable quantization; run weights in bf16/no-quant mode.
-      --offload MODE    none|cpu|disk — lower GPU memory (default: none).
+      --offload MODE    none|cpu|disk (default: none). Do NOT use cpu on this UMA box:
+                        GPU memory IS system RAM, offload frees nothing and only slows runs.
       --chunk-seconds N Auto-split clips longer than N sec into segments. Default 5;
                         use 0 to disable. Long clips default to smooth multi-keyframe
                         continuation for better seams.
@@ -82,7 +83,8 @@ frame count is snapped to 8k+1. Default is 320p 16:9 (576x320).
 
 Precision note: default is --quantization fp8-cast to reduce memory. Use --bf16
 (or --quantization none) to disable quantization; this can improve fidelity slightly
-but uses much more memory and may require --offload cpu.
+but uses much more memory. Do NOT reach for --offload cpu on this UMA machine
+(it frees nothing); free memory instead (stop/shrink llama-server, lower res/frames).
 
 Image note: --image forwards to LTX image conditioning as PATH FRAME STRENGTH [CRF].
 The wrapper defaults to frame 0 and strength 0.9 so a single source photo can be

@@ -1,7 +1,7 @@
 ---
 name: youtube-summary
-description: Download a YouTube video, transcribe with Breeze ASR 26, generate a detailed section-by-section breakdown, and upload both the summary and raw transcript to GitHub Gist. Use when the user says /youtube-summary with a YouTube link.
-version: 1.0.0
+description: Download a YouTube video, use Breeze ASR 26 for Taiwanese audio or the Breeze-compatible Transformers/ROCm Whisper Turbo pipeline for other languages, generate a detailed section-by-section breakdown, and upload both the summary and raw transcript to GitHub Gist. Use when the user says /youtube-summary with a YouTube link.
+version: 1.1.0
 author: AyaSakura / Pi Agent
 license: MIT
 metadata:
@@ -18,7 +18,9 @@ metadata:
 
 # YouTube Summary + Gist Upload
 
-Downloads a YouTube video, transcribes it using Breeze ASR 26, generates a **full summary** + **detailed section-by-section breakdown**, and uploads **both the summary and raw transcript** to a GitHub Gist.
+Downloads a YouTube video, transcribes **Taiwanese Hokkien with Breeze ASR 26** and **all other languages with Whisper Turbo through the Breeze streaming project's Transformers + ROCm pipeline**, generates a **full summary** + **detailed section-by-section breakdown**, and uploads **both the summary and raw transcript** to a GitHub Gist.
+
+The non-Taiwanese path must not call the standalone `openai-whisper` CLI: on the Strix Halo/gfx1151 host that path can select an incompatible ROCm/PyTorch stack and crash with `invalid device function` or a segmentation fault.
 
 ## Workflow
 
@@ -31,10 +33,18 @@ Supports:
 
 ### Step 2: Download + Transcribe
 
+Choose the ASR before running: use `--asr breeze` only when the video is Taiwanese Hokkien; otherwise leave the default Whisper Turbo.
+
 ```bash
+# Default: Breeze-compatible Whisper Turbo for non-Taiwanese audio
 python3 ~/.pi/agent/skills/media/youtube-summary/scripts/youtube-summary.py \
   "https://www.youtube.com/shorts/VIDEO_ID" \
   "Video Title"
+
+# Taiwanese Hokkien: Breeze ASR 26
+python3 ~/.pi/agent/skills/media/youtube-summary/scripts/youtube-summary.py \
+  --asr breeze "https://www.youtube.com/shorts/VIDEO_ID" \
+  "台語影片"
 ```
 
 **Output:**
@@ -61,6 +71,8 @@ The gist includes **two files**:
 ### youtube-summary.py
 
 Full pipeline (download → extract → transcribe → output):
+
+For non-Taiwanese audio, the script launches its hidden `--whisper-worker` using the Breeze streaming ROCm venv and `WhisperForConditionalGeneration`; it does not invoke the `whisper` executable. The worker uses `bfloat16`, timestamped HF pipeline chunks, and repairs missing/reversed timestamps before summary generation.
 
 ```python
 # Args: youtube_url [title]
@@ -150,12 +162,26 @@ python3 scripts/upload-gist.py "Summary..." "Transcript..." "Title"
 [完整原始逐字稿，不做任何修改或摘要]
 ```
 
-## Breeze ASR Configuration
+## ASR Configuration
 
+| Audio language | Backend | Invocation |
+|---|---|---|
+| Taiwanese Hokkien (台語) | Breeze ASR 26 | `--asr breeze` |
+| All other languages | Whisper Turbo | default (`--asr whisper`) |
+
+Breeze ASR endpoint:
 - **URL**: `http://127.0.0.1:8025`
 - **Max segment**: 28 seconds (3000 mel feature limit)
 - **Audio format**: Opus, 48kHz, mono, 16k
 - **Endpoint**: `POST /transcribe` with `file=@audio.ogg`
+
+Whisper Turbo is invoked through the Breeze streaming project's Transformers pipeline in `/home/chihmin/models-work/flux2/.venv-rocm72/bin/python` when available. The worker writes timestamped JSON used for the section breakdown and sets the Strix Halo ROCm variables `HSA_OVERRIDE_GFX_VERSION=11.5.1`, `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`, and `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`.
+
+Override defaults when needed:
+- `YOUTUBE_SUMMARY_PYTHON` — Python executable for the Whisper worker.
+- `YOUTUBE_SUMMARY_WHISPER_MODEL` — local HF snapshot or model ID.
+- `YOUTUBE_SUMMARY_WHISPER_LANGUAGE` — optional forced language such as `english`.
+- `HF_HOME` — Hugging Face cache root.
 
 ## Error Handling
 
@@ -164,6 +190,9 @@ python3 scripts/upload-gist.py "Summary..." "Transcript..." "Title"
 | Breeze ASR 500 | Wrong audio format — ensure opus/48kHz/mono/16k |
 | Long-form error | Audio >30s — split into ≤28s segments |
 | yt-dlp fails | Check URL format or network |
+| video path not found | The script now discovers `video.*`; check the yt-dlp output if no file was produced |
+| Whisper GPU crash | Confirm the Breeze ROCm venv/model path; do not replace the worker with the standalone `whisper` CLI |
+| invalid Whisper timestamps | The worker drops empty chunks and clamps reversed/missing timestamps |
 | Gist upload fails | Token invalid or no gist scope |
 | Empty transcript | Video has no speech (music only) |
 

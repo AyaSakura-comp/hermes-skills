@@ -58,9 +58,19 @@ Key facts:
 
 ## What the script does
 
-Restarts `lazygravity.target` (or, with `--no-bot`, just Xvfb + Antigravity), waits for
-CDP 9223, then prints each unit's active state, CDP status, and the open **workbench**
-pages (workspaces the bot can reach, e.g. `ComfyUI - Antigravity - …`).
+1. Restarts `lazygravity.target` (or, with `--no-bot`, just Xvfb + Antigravity) and waits
+   for CDP 9223 to answer HTTP.
+2. **Renderer liveness probe** (`scripts/probe_cdp.cjs`): attaches a WebSocket to EVERY
+   workbench page and runs a real `Runtime.evaluate`. This matters because the HTTP
+   `/json` endpoints are served by the *browser* process and stay green even when every
+   renderer is frozen — seen 2026-07-18: Antigravity's **GPU process died on startup**,
+   all renderers blocked waiting for a GPU channel, 12 page targets listed but every
+   `Runtime.enable` timed out (Discord error: `Failed to connect to workspace: Timeout
+   calling CDP method Runtime.enable`). **If any page hangs, the script automatically
+   restarts Antigravity once more and re-probes** (2 attempts max, then tells you to
+   check the GPU process: `ps -eo pid,args | grep -F -- --type=gpu-process`).
+3. Prints each unit's active state, CDP status, and the open **workbench** pages
+   (workspaces the bot can reach, e.g. `ComfyUI - Antigravity - …`).
 
 ## Manual verification (if needed)
 

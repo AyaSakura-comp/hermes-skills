@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taigi Speak"
+  short_description: "Directly convert Taiwanese Hokkien script/quote into speech"
+  default_prompt: "/taigi-speak [台詞]"

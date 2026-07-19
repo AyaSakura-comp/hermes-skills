@@ -48,11 +48,16 @@ for i in $(seq 1 5); do
   code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "${URL}/" 2>/dev/null)
   [ "$code" = "200" ] && break; sleep 3
 done
-log "${URL}/ -> HTTP ${code}"
-counts=$(curl -sf --max-time 10 "${URL}/api/photos" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('counts'))" 2>/dev/null)
-log "queue: ${counts:-?}"
-
-echo
-if [ "${code:-}" = "200" ]; then echo "Done. Open ${URL}/ on the iPhone."; else
+# The public root must return 200 even when passcode-gated: it serves the login page.
+# A 401 makes some browsers/webviews show an error instead of rendering that page.
+if [ "${code:-}" = "200" ]; then
+  log "${URL}/ -> HTTP ${code} (site/login page is reachable)"
+  counts=$(curl -sf --max-time 10 "${URL}/api/photos" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('counts'))" 2>/dev/null)
+  log "queue: ${counts:-?} (requires passcode when gated)"
+  echo
+echo "Done. Open ${URL}/ on the iPhone."
+else
+  log "${URL}/ -> HTTP ${code}"
+  echo
   echo "Not healthy. Check: docker compose logs --tail=40 ; journalctl --user -u fuji-gen -n 40 --no-pager"
 fi

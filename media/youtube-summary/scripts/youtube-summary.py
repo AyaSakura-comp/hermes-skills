@@ -2,8 +2,8 @@
 """
 YouTube Summary + Gist Upload
 =============================
-Downloads a YouTube video, transcribes with Breeze ASR 26,
-generates a Chinese summary, and uploads to GitHub Gist.
+Downloads a YouTube video, transcribes Taiwanese Hokkien with Breeze ASR 26
+or other languages with Whisper Turbo, then generates a Chinese summary.
 
 Usage:
     python3 youtube-summary.py <youtube_url> [title]
@@ -12,25 +12,83 @@ Environment:
     ~/.hermes/.env  -> GITHUB_TOKEN for gist upload
 """
 
+import argparse
 import sys
 import os
 import json
 import subprocess
+import time
 import urllib.request
 import urllib.error
+from pathlib import Path
 
 BREEZE_ASR_URL = "http://127.0.0.1:8025"
 BREEZE_ASR_MAX_DURATION = 28  # seconds per segment
 WORK_DIR = "/tmp/youtube-summary"
+SCRIPT_PATH = os.path.abspath(__file__)
+DEFAULT_WHISPER_PYTHON = "/home/chihmin/models-work/flux2/.venv-rocm72/bin/python"
+DEFAULT_WHISPER_MODEL = "openai/whisper-large-v3-turbo"
+
+
+def resolve_whisper_python():
+    """Select the ROCm-compatible Python used by the Breeze streaming project."""
+    configured = os.environ.get("YOUTUBE_SUMMARY_PYTHON")
+    if configured:
+        return configured
+    if os.path.isfile(DEFAULT_WHISPER_PYTHON):
+        return DEFAULT_WHISPER_PYTHON
+    return sys.executable
+
+
+def resolve_whisper_model():
+    """Prefer a locally cached HF model, while retaining a portable model ID fallback."""
+    configured = os.environ.get("YOUTUBE_SUMMARY_WHISPER_MODEL")
+    if configured:
+        return configured
+
+    hf_home = Path(os.environ.get("HF_HOME", "/home/chihmin/hf-models"))
+    snapshots = hf_home / "hub" / "models--openai--whisper-large-v3-turbo" / "snapshots"
+    candidates = [path for path in snapshots.glob("*") if path.is_dir()]
+    if candidates:
+        return str(max(candidates, key=lambda path: path.stat().st_mtime))
+    return DEFAULT_WHISPER_MODEL
+
+
+def build_whisper_command(audio_path, output_path, python_path=None, model_path=None):
+    """Build the Breeze-style Transformers worker command, never the openai-whisper CLI."""
+    command = [
+        python_path or resolve_whisper_python(),
+        SCRIPT_PATH,
+        "--whisper-worker",
+        "--worker-model", model_path or resolve_whisper_model(),
+        "--worker-audio", audio_path,
+        "--worker-output", output_path,
+    ]
+    language = os.environ.get("YOUTUBE_SUMMARY_WHISPER_LANGUAGE")
+    if language:
+        command.extend(["--worker-language", language])
+    return command
+
+
+def whisper_environment(base=None):
+    """Return ROCm settings required by Strix Halo/gfx1151."""
+    environment = dict(base or os.environ)
+    environment.setdefault("HF_HOME", "/home/chihmin/hf-models")
+    environment.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.5.1")
+    environment.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
+    environment.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+    return environment
 
 
 def run(cmd, **kwargs):
-    """Run a command and return stdout."""
+    """Run a command and return stdout with useful failure diagnostics."""
     result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
     if result.returncode != 0 and kwargs.get("check", True):
-        print(f"ERROR: {' '.join(cmd)}")
-        print(result.stderr[-500:] if result.stderr else "No stderr")
-        sys.exit(1)
+        command = " ".join(cmd)
+        details = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise RuntimeError(
+            f"Command failed with exit code {result.returncode}: {command}\n{details[-2000:]}"
+        )
     return result.stdout.strip()
 
 
@@ -47,6 +105,14 @@ def get_duration(filepath):
         return 0
 
 
+def find_downloaded_video(work_dir):
+    """Return yt-dlp's downloaded video regardless of its container extension."""
+    candidates = sorted(Path(work_dir).glob("video.*"))
+    if not candidates:
+        raise FileNotFoundError(f"yt-dlp did not produce a video in {work_dir}")
+    return str(candidates[0])
+
+
 def download_video(url):
     """Download video with yt-dlp."""
     os.makedirs(WORK_DIR, exist_ok=True)
@@ -58,7 +124,7 @@ def download_video(url):
         "-o", "video.%(ext)s",
         url
     ])
-    return os.path.join(WORK_DIR, "video.webm")
+    return find_downloaded_video(WORK_DIR)
 
 
 def extract_audio(video_path):
@@ -138,8 +204,8 @@ def transcribe_segment(segment_path):
         return "", 0
 
 
-def transcribe_audio(audio_path):
-    """Full transcription pipeline. Returns (full_text, list_of_segments_with_timestamps)."""
+def transcribe_with_breeze(audio_path):
+    """Transcribe Taiwanese audio with Breeze ASR 26."""
     segments = get_segments(audio_path)
     transcript_segments = []  # (start_s, end_s, text)
     total_elapsed = 0
@@ -154,6 +220,93 @@ def transcribe_audio(audio_path):
         os.remove(seg)  # Clean up segment
 
     return "".join(s[2] for s in transcript_segments), transcript_segments, total_elapsed
+
+
+def normalize_whisper_segments(chunks):
+    """Convert HF Whisper chunks to valid (start, end, text) tuples."""
+    normalized = []
+    for chunk in chunks:
+        text = str(chunk.get("text", "")).strip()
+        timestamp = chunk.get("timestamp") or [None, None]
+        if not text or timestamp[0] is None:
+            continue
+        start = float(timestamp[0])
+        end = timestamp[1]
+        end = float(end) if end is not None else start + 0.01
+        if end <= start:
+            end = start + 0.01
+        normalized.append((start, end, text))
+    return normalized
+
+
+def transcribe_with_whisper(audio_path):
+    """Transcribe non-Taiwanese audio through Breeze's Transformers/ROCm path."""
+    output_path = os.path.join(WORK_DIR, "audio.json")
+    print("🎤 Transcribing with Breeze-style Whisper Turbo...")
+    print(f"   Python: {resolve_whisper_python()}")
+    print(f"   Model: {resolve_whisper_model()}")
+    started = time.perf_counter()
+    run(
+        build_whisper_command(audio_path, output_path),
+        env=whisper_environment(),
+    )
+    elapsed = time.perf_counter() - started
+
+    with open(output_path, encoding="utf-8") as f:
+        result = json.load(f)
+    transcript_segments = normalize_whisper_segments(result.get("chunks", []))
+    return result.get("text", "").strip(), transcript_segments, result.get("elapsed_s", elapsed)
+
+
+def run_whisper_worker(audio_path, output_path, model_path, language=None):
+    """Run inside the Breeze ROCm venv and serialize a Transformers Whisper result."""
+    os.environ.update(whisper_environment())
+    import torch
+    from transformers import AutomaticSpeechRecognitionPipeline, WhisperForConditionalGeneration, WhisperProcessor
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    print(
+        f"Whisper worker: torch={torch.__version__}, hip={torch.version.hip}, "
+        f"device={device}, dtype={dtype}",
+        file=sys.stderr,
+    )
+    processor = WhisperProcessor.from_pretrained(model_path)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        model_path,
+        dtype=dtype,
+        low_cpu_mem_usage=True,
+    ).to(device).eval()
+    pipeline = AutomaticSpeechRecognitionPipeline(
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        device=0 if device == "cuda" else -1,
+        dtype=dtype,
+    )
+
+    started = time.perf_counter()
+    generate_kwargs = {"task": "transcribe"}
+    if language:
+        generate_kwargs["language"] = language
+    with torch.inference_mode():
+        result = pipeline(audio_path, return_timestamps=True, generate_kwargs=generate_kwargs)
+        if device == "cuda":
+            torch.cuda.synchronize()
+    result = {
+        "text": result.get("text", "").strip(),
+        "chunks": result.get("chunks", []),
+        "elapsed_s": time.perf_counter() - started,
+    }
+    with open(output_path, "w", encoding="utf-8") as output:
+        json.dump(result, output, ensure_ascii=False)
+
+
+def transcribe_audio(audio_path, asr):
+    """Route transcription to the selected ASR backend."""
+    if asr == "breeze":
+        return transcribe_with_breeze(audio_path)
+    return transcribe_with_whisper(audio_path)
 
 
 def format_timestamp(seconds):
@@ -316,16 +469,43 @@ def cleanup():
         shutil.rmtree(WORK_DIR)
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 youtube-summary.py <youtube_url> [title]")
-        sys.exit(1)
+def parse_args(argv=None):
+    """Parse command-line options for the YouTube summary pipeline and worker."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--asr", choices=("whisper", "breeze"), default="whisper",
+        help="Use Breeze ASR 26 (Taiwanese) or the Breeze-style Whisper Turbo worker.",
+    )
+    parser.add_argument("--whisper-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-audio", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-output", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-model", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-language", help=argparse.SUPPRESS)
+    parser.add_argument("url", nargs="?", help="YouTube video URL")
+    parser.add_argument("title", nargs="?", default="unknown", help="Optional video title")
+    return parser.parse_args(argv)
 
-    youtube_url = sys.argv[1]
-    video_title = sys.argv[2] if len(sys.argv) > 2 else "unknown"
+
+def main():
+    args = parse_args()
+    if args.whisper_worker:
+        if not all((args.worker_audio, args.worker_output, args.worker_model)):
+            raise ValueError("Whisper worker requires audio, output, and model paths")
+        run_whisper_worker(
+            args.worker_audio,
+            args.worker_output,
+            args.worker_model,
+            args.worker_language,
+        )
+        return
+    if not args.url:
+        raise ValueError("YouTube URL is required")
+    youtube_url = args.url
+    video_title = args.title
 
     print(f"🎯 Processing: {youtube_url}")
     print(f"📝 Title: {video_title}")
+    print(f"🎙️ ASR: {'Breeze ASR 26 (Taiwanese)' if args.asr == 'breeze' else 'Whisper Turbo'}")
     print()
 
     try:
@@ -336,7 +516,7 @@ def main():
         audio_path = extract_audio(video_path)
 
         # Step 3: Transcribe
-        transcript, transcript_segments, elapsed = transcribe_audio(audio_path)
+        transcript, transcript_segments, elapsed = transcribe_audio(audio_path, args.asr)
 
         if not transcript.strip():
             print("⚠️  Transcription returned empty text!")

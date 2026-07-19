@@ -1,0 +1,3 @@
+interface:
+  display_name: "Restart Power Monitor"
+  short_description: "重啟 Strix Halo 電源監控與 Tailscale Funnel 服務，並進行端對端健康檢查"

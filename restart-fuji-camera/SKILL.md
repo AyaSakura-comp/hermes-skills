@@ -21,7 +21,9 @@ bash ~/.hermes/skills/restart-fuji-camera/scripts/restart.sh
 ```
 
 Idempotent. It restarts the host GPU gen service + the docker stack (app + tailscale), then
-verifies `https://fuji-camera.crayfish-monitor.ts.net/` returns 200.
+verifies `https://fuji-camera.crayfish-monitor.ts.net/` returns 200. When passcode-gated, the
+root still returns 200 and renders the login page so browsers and embedded webviews do not treat it
+as an HTTP error.
 
 ## Architecture — this is a Docker deployment (GPU stays on the host)
 
@@ -59,7 +61,7 @@ systemctl --user enable --now fuji-camera-docker.service   # = docker compose up
 #    or directly: cd ~/src/fuji_camera && docker compose up -d
 
 # 3. verify
-curl -s -o /dev/null -w "%{http_code}\n" https://fuji-camera.crayfish-monitor.ts.net/   # 401 (gated) = up
+curl -s -o /dev/null -w "%{http_code}\n" https://fuji-camera.crayfish-monitor.ts.net/   # 200 (app or passcode login page) = up
 ```
 
 `fuji-gen.service` + `fuji-camera-docker.service` (systemd `--user`, linger on) and the containers
@@ -80,6 +82,10 @@ passcode's group.
 
 - Restart order matters: **app first, then the ts sidecar** (it shares the app's netns) — the
   script already does `docker restart fuji-camera-app` then `fuji-camera-ts`.
+- **Public login root must be HTTP 200, not 401.** The login HTML is a normal page, not an HTTP
+  authentication challenge; returning 401 can make browser/webview clients display an error instead
+  of the passcode form. Keep `/api/*` unauthenticated responses at 401, but return the login page
+  with 200 for non-API paths.
 - Logs: `docker compose logs --tail=40` (in `~/src/fuji_camera`), `journalctl --user -u fuji-gen -n 40 --no-pager`.
 - **Frontend edits (`static/index.html`) are live on refresh** — no restart needed. Restart only for
   `server.py` / `gen_service.py` changes (rebuild the image for `server.py`: `docker compose up -d --build`).

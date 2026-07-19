@@ -11,25 +11,57 @@
 # Usage: restart.sh [--no-bot]   (--no-bot: only restart Xvfb + Antigravity)
 set -uo pipefail
 CDP_PORT="9223"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LG_DIR="/home/chihmin/src/LazyGravity"
 log(){ printf '  %s\n' "$*"; }
 cdp_up(){ curl -sf "http://localhost:${CDP_PORT}/json/version" >/dev/null 2>&1; }
 
+do_restart(){
+  if [ "${1:-}" = "--no-bot" ]; then
+    log "restarting Xvfb + Antigravity only..."
+    systemctl --user reset-failed lazygravity-antigravity.service 2>/dev/null || true
+    systemctl --user restart openclaw-xvfb.service lazygravity-antigravity.service
+  else
+    log "restarting full stack (lazygravity.target)..."
+    systemctl --user reset-failed lazygravity-antigravity.service 2>/dev/null || true
+    systemctl --user restart lazygravity.target
+  fi
+  # antigravity unit holds in 'activating' until CDP answers; poll ourselves too
+  for i in $(seq 1 40); do cdp_up && break; sleep 1; done
+}
+
+# Renderer liveness = a REAL Runtime.evaluate on every workbench page.
+# HTTP /json keeps answering from the browser process even when all renderers
+# are frozen (e.g. GPU process died on startup -> renderers block on the GPU
+# channel -> the bot times out on Runtime.enable). Give freshly opened
+# workspaces a grace period before judging.
+renderers_alive(){
+  sleep 6
+  (cd "$LG_DIR" && CDP_PORT="$CDP_PORT" node "$SCRIPT_DIR/probe_cdp.cjs")
+}
+
 echo "== restart-gemini =="
 
-if [ "${1:-}" = "--no-bot" ]; then
-  log "[1/2] restarting Xvfb + Antigravity only..."
+log "[1/3] restart"
+do_restart "${1:-}"
+
+log "[2/3] renderer liveness probe (real Runtime.evaluate, not just HTTP)"
+if renderers_alive; then
+  log "renderers: all alive"
+else
+  log "renderers HUNG (zombie state: HTTP fine but pages unresponsive) -> restarting Antigravity once more"
   systemctl --user reset-failed lazygravity-antigravity.service 2>/dev/null || true
   systemctl --user restart openclaw-xvfb.service lazygravity-antigravity.service
-else
-  log "[1/2] restarting full stack (lazygravity.target)..."
-  systemctl --user reset-failed lazygravity-antigravity.service 2>/dev/null || true
-  systemctl --user restart lazygravity.target
+  for i in $(seq 1 40); do cdp_up && break; sleep 1; done
+  if renderers_alive; then
+    log "renderers: alive after second restart"
+  else
+    log "renderers STILL hung after 2 attempts — needs manual investigation"
+    log "check GPU process: ps -eo pid,args | grep -F -- --type=gpu-process | grep -i antigravity"
+  fi
 fi
 
-# antigravity unit holds in 'activating' until CDP answers; poll ourselves too
-for i in $(seq 1 40); do cdp_up && break; sleep 1; done
-
-log "[2/2] verifying..."
+log "[3/3] verifying units..."
 for u in openclaw-xvfb lazygravity-antigravity lazygravity-bot lazygravity-autoapprove; do
   printf '      %-26s %s\n' "$u" "$(systemctl --user is-active ${u}.service)"
 done

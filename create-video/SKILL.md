@@ -1,7 +1,7 @@
 ---
 name: create-video
-description: Generate a short video (with synchronized audio) from a text prompt or source image + prompt using LTX-2.3, Lightricks' 22B audio-video diffusion model, on the local ROCm GPU. Use when the user wants to create/generate a video, make a short clip, animate a scene, or turn a photo/text description into a moving image with sound.
-version: 1.0.0
+description: Generate a short video (with synchronized audio) from a text prompt or source image + prompt using LTX-2.3, Lightricks' 22B audio-video diffusion model, on the local ROCm GPU. Use for ANY movie/video-making request — create/generate a video, make a film/movie/short clip/trailer/MV/advertisement/animation, 拍片/做影片/做電影/做動畫, animate a scene, or turn a photo/text description into a moving image with sound. Longer pieces = generate multiple clips with this skill and stitch them with ffmpeg.
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 prerequisites:
@@ -61,7 +61,7 @@ Defaults: **320p 16:9 (576×320), 3 s @ 24 fps**, fp8, flash attention on.
 | `--steps` | Override stage-1 denoise steps | model default |
 | `--quantization` | `fp8-cast\|fp8-scaled-mm\|bf16\|none` | `fp8-cast` |
 | `--bf16` | Disable quantization; same as `--quantization none` | off |
-| `--offload` | `none\|cpu\|disk` — lower GPU memory | `none` |
+| `--offload` | `none\|cpu\|disk` — ⚠️ do NOT use `cpu` on this box (UMA: GPU memory IS system RAM, offload frees nothing and only adds copies; see perf notes) | `none` |
 | `--chunk-seconds` | Auto-split clips longer than this into segments (0 = never split) | `5` |
 | `--smooth-chunks` | Use multi-keyframe overlap continuation for long clips | on |
 | `--fast-chunks` | Use old faster last-frame chunking instead of smooth continuation | off |
@@ -97,7 +97,8 @@ create_video.sh --image ./cat.jpg -p "The cat blinks, looks toward the camera, s
 create_video.sh --image ./landscape.png --image-strength 0.75 -p "Clouds drift slowly over the mountains" -o landscape_motion.mp4
 
 # Higher-memory bf16/no-quant mode instead of default fp8-cast
-create_video.sh --image ./cat.jpg -p "The cat slowly blinks" --bf16 --offload cpu -o cat_bf16.mp4
+# (no --offload: this UMA box gains nothing from CPU offload — free memory instead)
+create_video.sh --image ./cat.jpg -p "The cat slowly blinks" --bf16 -o cat_bf16.mp4
 ```
 
 ## Prompting tips (LTX-2.3 — official Lightricks guidance)
@@ -193,9 +194,14 @@ Timings (with audio, all fixes on):
   (quadratic in tokens). Neither is fixable on this GPU (no fp8 matmul) — reduce frames/res.
 - Default precision is `--quantization fp8-cast` to keep the 22B model within memory.
   Use `--bf16` / `--quantization none` for bf16/no-quant comparisons; expect much higher
-  memory pressure and consider `--offload cpu`.
+  memory pressure.
+- **⚠️ Never use `--offload cpu` on this machine.** Strix Halo is UMA: "GPU memory" is
+  the same physical RAM as CPU memory (GTT). Offloading to CPU frees no memory at all —
+  it just adds host↔device copies and slows the run down. When memory is tight, actually
+  FREE memory instead: stop/shrink the big `llama-server` (qwen-mtp ctx/slots), stop
+  other GPU services, or lower resolution/frames.
 - fp8 peak ~50–55 GB; resident transformer raises peak. The box shares RAM as GTT — if a
-  large `llama-server` is running, free memory (shrink its ctx/slots) or pass `--offload cpu`.
+  large `llama-server` is running, free memory (shrink its ctx/slots) before generating.
 
 ### Long clips: auto-chunking (avoids OOM / earlyoom kills)
 
