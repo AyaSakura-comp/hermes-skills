@@ -60,6 +60,19 @@ POSING_STRENGTH = 1.2
 POSING_KEYWORDS = ("擺拍", "摆拍", "擺姿", "摆姿", "airflow", "airyflat", "airy flat", "airyf1at",
                    "posing", "pose shot", "ポーズ")
 
+# Pixel-art sprite look: Anima-base LoRA (Civitai 2948181, "Pixel Art Sprite - Elin - Style").
+# Chained BEFORE @gpt-image-2 for 二次元像素風 / pixel-art requests. The model card's trained words are
+# "pixel art, chibi, white background, simple background"; keep pixel-art first, drop the last two if the
+# request clearly wants a busy/detailed background. Missing file degrades gracefully to prompt-only.
+PIXEL_LORA = "ElinSprite_AnimaBaseV10_byKonan.safetensors"
+PIXEL_TRIGGER = "pixel art, chibi, white background, simple background, "
+PIXEL_STRENGTH = 1.0
+# Background clutter cues → drop the white/simple-background trained words.
+PIXEL_BUSY_BG_KEYWORDS = ("background", "背景", "scene", "場景", "场景", "landscape", "cityscape",
+                          "forest", "室內", "室内", "街道", "interior")
+PIXEL_KEYWORDS = ("像素風", "像素风", "像素", "pixel art", "pixel-art", "pixelart", "pixel sprite",
+                  "sprite", "ドット絵", "ドットえ", "8-bit", "8bit", "16-bit", "16bit")
+
 # Aspect buckets: generate around 720p-equivalent work, then Lanczos upscale to ~1080p-equivalent
 # output pixels. Default is portrait 2:3 because it is faster than native tall generation and better
 # matches character/waifu requests. Users can override with --aspect-ratio (e.g. 16:9, 3:2, 1:1).
@@ -347,6 +360,14 @@ def _run_anime_with_comfy(args, t_all: float, ready_seconds: float) -> int:
             (Path(COMFY_DIR) / "models" / "loras" / POSING_LORA).exists():
         loras.insert(0, (POSING_LORA, POSING_STRENGTH))
         trigger = POSING_TRIGGER + trigger
+    # Pixel-art / 二次元像素風 -> chain the Elin pixel-sprite LoRA BEFORE @gpt-image-2 (if present).
+    if any(k in pl or k in args.prompt for k in PIXEL_KEYWORDS) and \
+            (Path(COMFY_DIR) / "models" / "loras" / PIXEL_LORA).exists():
+        loras.insert(0, (PIXEL_LORA, PIXEL_STRENGTH))
+        # Drop the white/simple-background trained words when the request clearly wants a scene.
+        wants_bg = any(k in pl or k in args.prompt for k in PIXEL_BUSY_BG_KEYWORDS)
+        pixel_trigger = "pixel art, chibi, " if wants_bg else PIXEL_TRIGGER
+        trigger = pixel_trigger + trigger
     # Dramatic lighting -> chain the lighting/atmosphere enhancer LoRA after @gpt-image-2 if present.
     # Missing file degrades gracefully to prompt-only lighting.
     if any(k in pl or k in args.prompt for k in LIGHTING_KEYWORDS) and \

@@ -37,6 +37,7 @@ The script prints JSON. Attach its `final_path` in the same Discord reply:
 | Anime / illustration / waifu | `--anime` — mandatory Anima backend |
 | High-quality anime | `--anime --native-1080p` |
 | PVC / figure / 手辦 / フィギュア | `--anime`; include `pvc figure` in prompt (the script switches checkpoint) |
+| 二次元像素風 / pixel art / sprite / ドット絵 | `--anime`; pixel keyword auto-loads the Elin pixel-sprite LoRA + `pixel art, chibi, white background, simple background` (drops the background words when the prompt asks for a scene) |
 | Text-only Fuji / analog film look | film wording in prompt (auto LoRA), or `--film` |
 
 Examples:
