@@ -1,6 +1,6 @@
 ---
 name: firecrawl-temp-email-signup
-description: Register a Firecrawl account using a temporary email (mail.tm API), verify it via the confirmation link, and complete onboarding to obtain an API key.
+description: Register a Firecrawl account using a temporary email (Tempail), verify it via the confirmation link, and complete onboarding to obtain an API key.
 ---
 
 # Firecrawl Signup with Temporary Email
@@ -13,165 +13,233 @@ Automated registration for Firecrawl using a disposable email service, email ver
 - No existing credentials available
 - Need to bypass manual signup flow
 
-## Step 1: Find a Disposable Email
+## Current Credentials
 
-Try these sources (in order):
-1. **temp-mail.org** — but it's Cloudflare-protected; browser DOM clicks are INEFFECTIVE. Skip automation on this site.
-2. **mail.tm API** — the reliable fallback. Use REST API for full automation.
+A working Firecrawl account is already registered. Credentials are stored securely in `~/.pi/agent/auth.json` under the `firecrawl` key. Pi agent reads them automatically — **never expose the API key in shared files or commit them to version control**.
 
-## Step 2: Create Mail.tm Account via API
+## Step 1: Get a Temporary Email from Tempail
 
-```python
-import requests
+Navigate to `https://tempail.com/en/` — it **no longer requires reCAPTCHA**. The page immediately generates a temporary email address (e.g. `caspecakke@necub.com`) in the `textbox` element. No API calls needed.
 
-# Get available domains first
-domains = requests.get("https://api.mail.tm/domains").json()["hydra:member"]
-domain = domains[0]["domain"]
+> **Note:** Tempail emails expire after 1 hour. The domain is `necub.com`.
 
-# Generate random email and password
-username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-email = f"{username}@{domain}"
-password = "TempPass" + ''.join(random.choices(string.digits, k=6))
+### Browser Flow
 
-# Create account
-resp = requests.post("https://api.mail.tm/accounts", json={
-    "address": email,
-    "password": password
-})
-
-# Authenticate (get JWT token)
-jwt_token = requests.post("https://api.mail.tm/token", json={
-    "address": email,
-    "password": password
-}).json()["token"]
-```
-
-Headers for all subsequent API calls:
-```
-Authorization: Bearer <jwt_token>
-Content-Type: application/json
-```
-
-## Step 3: Firecrawl Signup
-
-1. Navigate to `https://firecrawl.com/signup`
-2. Enter the temp email and password
-3. Click Sign Up → redirects to `/confirm-email`
-
-## Step 4: Extract Verification Email
-
-```python
-import time
-
-# Wait a few seconds, then fetch messages
-headers = {"Authorization": f"Bearer {jwt_token}"}
-msgs = requests.get("https://api.mail.tm/messages", headers=headers).json()["hydra:member"]
-
-for msg in msgs:
-    msg_detail = requests.get(f"https://api.mail.tm/messages/{msg['id']}", headers=headers).json()
-    body = msg_detail["text"]  # or "html"
-    # Extract verification URL from body
-    import re
-    url_match = re.search(r'https://api\.firecrawl\.dev/verify\?.*?token=[a-zA-Z0-9_-]+', body)
-    if url_match:
-        verify_url = url_match.group(0)
-        break
-```
-
-## Step 5: Verify Email
-
-Navigate directly to the verification URL extracted from the email body. This completes email verification.
-
-## Step 6: Complete Onboarding
-
-After verification, you're redirected to the onboarding flow (6 steps):
-
-1. **Step 1** — Welcome/setup (skip optional fields)
-2. **Step 2** — Team info (skip)
-3. **Step 3** — Usage info (skip)
-4. **Step 4** — Scrape your first website (API Key shown here in cURL example)
-5. **Step 5** — More examples
-6. **Step 6** — Next steps
-
-**Strategy:** Click "Skip" on optional steps, accept Terms of Service when prompted, then "Continue" to reach the dashboard.
-
-## Step 7: Extract API Key
-
-The API Key is displayed in the Step 4 code example:
 ```bash
-curl -X POST 'https://api.firecrawl.dev/v2/scrape' \
--H 'Authorization: Bearer <YOUR_API_KEY>' \
--H 'Content-Type: application/json' \
--d '{"url": "firecrawl.dev"}'
+browser open https://tempail.com/en/
+browser snapshot -i  # find the textbox element (ref like @e31)
+browser get text @e31  # read the generated email
 ```
 
-Use browser console to extract:
-```javascript
-document.querySelector('code').textContent
+The email is auto-generated. Copy it for the next step.
+
+### Password
+
+Generate a random password with at least one special character:
+```python
+import random, string
+password = "TempPass" + ''.join(random.choices(string.digits, k=6)) + "!"
+# e.g. "TempPass748126!"
 ```
 
-Or read it from the page directly via vision/snapshot.
+## Step 2: Firecrawl Signup
+
+1. Navigate to `https://www.firecrawl.dev/signin`
+2. Click "Sign Up" tab
+3. Enter the temp email and password (must contain a special character)
+4. Click "Create Account" → redirects to `/confirm-email?email=...`
+
+```bash
+browser open https://www.firecrawl.dev/signin
+browser snapshot -i
+browser fill @e10 <temp_email>
+browser fill @e11 <password_with_special_char>
+browser click @e2  # Create Account
+```
+
+## Step 3: Verify Email via Tempail
+
+The verification email arrives in the Tempail inbox. Tempail no longer has reCAPTCHA, so we can automate inbox checks.
+
+### Check Tempail Inbox
+
+```bash
+browser open https://tempail.com/en/
+browser snapshot -i
+```
+
+If no inbox items are visible, click "Refresh" (`@e13` or similar) and wait a few seconds. Firecrawl emails typically arrive within 5–10 seconds.
+
+### Open the Verification Email
+
+When the email appears in the inbox, click on it to open and read the verification link. The link looks like:
+```
+https://www.firecrawl.dev/signin/verify-email?token=...
+```
+
+Navigate directly to that URL to complete email verification.
+
+```bash
+browser snapshot -i  # find the email item
+browser click <email_ref>  # open the email
+# read the verification link from the email body
+browser open <verification_url>
+```
+
+## Step 4: Login to Firecrawl
+
+After email verification, log in:
+
+1. Go to `https://www.firecrawl.dev/signin`
+2. Click "Log In" tab
+3. Enter email and password
+4. Click "Sign in"
+
+```bash
+browser open https://www.firecrawl.dev/signin
+browser snapshot -i
+browser fill @e12 <email>
+browser fill @e13 <password>
+browser click @e4  # Sign in
+```
+
+## Step 5: Complete Onboarding
+
+After login, you'll enter the onboarding flow (up to 5 steps):
+
+| Step | Content | Strategy |
+|------|---------|----------|
+| 1 | "Let's get you started" (bonus credits tasks) | Skip — all optional |
+| 2 | "How did you first hear about us?" | Skip |
+| 3 | "Terms of Service & Privacy Policy" | Toggle "I agree" → Continue |
+| 4 | "Scrape your first website" (API Key shown) | **← API Key is here** |
+| 5 | More examples | Skip |
+
+**Strategy:** Click "Skip" on steps 1–2, toggle agreement on step 3, then **extract the API Key from step 4**.
+
+### Step 3 — Accept Terms
+
+```bash
+browser click @e6  # I agree toggle
+browser click @e3  # Continue
+```
+
+### Step 4 — Extract API Key
+
+The API Key is displayed in the "Connect via CLI" section as part of a `npx` command:
+
+```
+npx -v firecrawl-cli@latest init --all -k fc-xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Read the API Key (starts with `fc-`) from the page:
+
+```bash
+browser snapshot -i
+# Look for the code block with the npx command containing the API key
+# Or use screenshot + vision to extract it
+```
+
+## Step 6: Save the API Key
+
+Store the API Key in `~/.pi/agent/auth.json`:
+
+```json
+"firecrawl": {
+    "type": "api_key",
+    "key": "fc-xxxxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+### Update auth.json
+
+```bash
+# Read current auth.json
+cat ~/.pi/agent/auth.json | python3 -c "import sys, json; d=json.load(sys.stdin); ..."
+```
+
+Or use `edit` tool to add the entry to the existing JSON.
+
+> **NOTE:** A working API key is already registered. If you need a new account, follow the full flow above to get a fresh key.
+
+## Step 7: Verify the API Key
+
+Test the key with a quick scrape:
+
+```bash
+curl -s -X POST "https://api.firecrawl.dev/v1/scrape" \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://firecrawl.dev"}'
+```
+
+Should return `{"success":true,...}`.
+
+Expected output:
+```json
+{
+  "success": true,
+  "data": {
+    "markdown": "...",
+    "metadata": {
+      "creditsUsed": 1
+    }
+  }
+}
+```
 
 ## Key Endpoints
 
 | Purpose | URL |
 |---------|-----|
-| Signup | `https://firecrawl.com/signup` |
-| Verify email | `https://api.firecrawl.dev/verify?token=xxx` |
-| Scrape API | `https://api.firecrawl.dev/v2/scrape` |
-| Mail.tm accounts | `https://api.mail.tm/accounts` |
-| Mail.tm auth | `https://api.mail.tm/token` |
-| Mail.tm messages | `https://api.mail.tm/messages` |
-| Mail.tm domains | `https://api.mail.tm/domains` |
+| Tempail (temp email) | `https://tempail.com/en/` |
+| Firecrawl Signup | `https://www.firecrawl.dev/signin` (Sign Up tab) |
+| Firecrawl Login | `https://www.firecrawl.dev/signin` (Log In tab) |
+| Verify email | `https://www.firecrawl.dev/signin/verify-email?token=...` |
+| Onboarding | `https://www.firecrawl.dev/onboarding` |
+| Scrape API | `https://api.firecrawl.dev/v1/scrape` |
 
 ## Pitfalls
 
-- **temp-mail.org is Cloudflare-blocked** — do NOT attempt browser automation on it; DOM clicks won't work
-- **Firecrawl email verification uses a token link**, not an OTP code — extract the full URL from the email body
-- **Onboarding has 6 steps** — most are optional; use "Skip" buttons to speed through
-- **mail.tm domains change** — always fetch available domains from the API rather than hardcoding `wshu.net`
-- **Email delay** — allow 3-5 seconds between signup and checking for messages
+- **Password must contain a special character** — Firecrawl rejects passwords like `TempPass123456`; use `TempPass123456!` or similar
+- **Firecrawl email verification uses a token link** — extract the full verification URL from the Tempail inbox
+- **Onboarding has up to 5 steps** — most are optional; use "Skip" buttons to speed through
+- **Terms of Service must be accepted** — toggle the "I agree" checkbox before continuing
+- **API Key is on onboarding step 4** — you need to get through steps 1–3 first
 - **API Key format** — starts with `fc-` followed by a hex-like string
+- **Tempail email expires after 1 hour** — if you need a longer-lived address, use a different service or a real email
+- **Tempail is reCAPTCHA-free** — you can automate inbox checks via browser
 
-## Quick Reference: Full Automation Script
+## Quick Reference: Full Automation Flow
 
-```python
-import requests
-import re
-import random
-import string
-import time
+```bash
+# 1. Get temp email
+browser open https://tempail.com/en/
+browser snapshot -i
+EMAIL=$(browser get text @e31)
+PASSWORD="TempPass$(python3 -c 'import random; print(random.randint(100000,999999))')!"
 
-def create_mail_tm_account():
-    """Create a disposable mail.tm account and return credentials."""
-    # Get available domain
-    domains = requests.get("https://api.mail.tm/domains").json()["hydra:member"]
-    domain = domains[0]["domain"]
-    
-    # Generate random email
-    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    email = f"{username}@{domain}"
-    password = "TempPass" + ''.join(random.choices(string.digits, k=6))
-    
-    # Register
-    requests.post("https://api.mail.tm/accounts", json={"address": email, "password": password})
-    
-    # Get JWT token
-    jwt = requests.post("https://api.mail.tm/token", json={"address": email, "password": password}).json()["token"]
-    return email, password, jwt
+# 2. Sign up on Firecrawl
+browser open https://www.firecrawl.dev/signin
+browser snapshot -i
+browser fill @e10 $EMAIL
+browser fill @e11 $PASSWORD
+browser click @e2  # Create Account
 
-def get_verification_email(jwt, timeout=30):
-    """Wait for and extract Firecrawl verification URL."""
-    headers = {"Authorization": f"Bearer {jwt}"}
-    start = time.time()
-    while time.time() - start < timeout:
-        msgs = requests.get("https://api.mail.tm/messages", headers=headers).json()["hydra:member"]
-        for msg in msgs:
-            detail = requests.get(f"https://api.mail.tm/messages/{msg['id']}", headers=headers).json()
-            body = detail.get("text", "") + detail.get("html", "")
-            url_match = re.search(r'https://api\.firecrawl\.dev/verify\?.*?token=[a-zA-Z0-9_-]+', body)
-            if url_match:
-                return url_match.group(0)
-        time.sleep(3)
-    return None
+# 3. Wait for verification email, then open Tempail
+browser open https://tempail.com/en/
+browser snapshot -i
+# Click the verification email, get the URL, navigate to it
+
+# 4. Login
+browser open https://www.firecrawl.dev/signin
+browser snapshot -i
+browser fill @e12 $EMAIL
+browser fill @e13 $PASSWORD
+browser click @e4  # Sign in
+
+# 5. Skip onboarding steps, accept terms, get API key
+browser click @e6  # I agree
+browser click @e3  # Continue
+# Read API key from step 4 page
 ```

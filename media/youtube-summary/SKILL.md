@@ -1,7 +1,7 @@
 ---
 name: youtube-summary
-description: Download a YouTube video, use Breeze ASR 26 for Taiwanese audio or the Breeze-compatible Transformers/ROCm Whisper Turbo pipeline for other languages, generate a detailed section-by-section breakdown, and upload both the summary and raw transcript to GitHub Gist. Use when the user says /youtube-summary with a YouTube link.
-version: 1.1.0
+description: Download a YouTube video, use Breeze ASR 26 for Taiwanese audio or the Breeze-compatible Transformers/ROCm Whisper Turbo pipeline for other languages, then upload the raw transcript and a timestamped section breakdown to GitHub Gist. No external LLM calls. Triggers automatically when a YouTube URL is detected in the user's message. Also triggered by /youtube-summary command.
+version: 1.3.0
 author: AyaSakura / Pi Agent
 license: MIT
 metadata:
@@ -11,6 +11,9 @@ metadata:
 
 ## Usage
 
+Auto-trigger: When a **YouTube URL** is detected in the user's message, run this skill automatically.
+
+Manual trigger:
 ```
 /youtube-summary https://youtube.com/watch?v=xxx
 /youtube-summary https://www.youtube.com/shorts/xxx [optional title]
@@ -18,7 +21,9 @@ metadata:
 
 # YouTube Summary + Gist Upload
 
-Downloads a YouTube video, transcribes **Taiwanese Hokkien with Breeze ASR 26** and **all other languages with Whisper Turbo through the Breeze streaming project's Transformers + ROCm pipeline**, generates a **full summary** + **detailed section-by-section breakdown**, and uploads **both the summary and raw transcript** to a GitHub Gist.
+Downloads a YouTube video, transcribes **Taiwanese Hokkien with Breeze ASR 26** and **all other languages with Whisper Turbo through the Breeze streaming project's Transformers + ROCm pipeline**, then uploads **the raw transcript** and **a timestamped section breakdown** to a GitHub Gist.
+
+No external LLM calls are made — the summary is assembled directly from the transcript segments.
 
 The non-Taiwanese path must not call the standalone `openai-whisper` CLI: on the Strix Halo/gfx1151 host that path can select an incompatible ROCm/PyTorch stack and crash with `invalid device function` or a segmentation fault.
 
@@ -52,18 +57,20 @@ python3 ~/.pi/agent/skills/media/youtube-summary/scripts/youtube-summary.py \
 - Transcript segments with timestamps (JSON format)
 - Summary prompt for Qwen with section-by-section breakdown instructions
 
-### Step 3: Qwen Processing
+### Step 3: Assemble Summary from Transcript
 
-Qwen receives the prompt and generates:
-1. **完整摘要** - 3-5 key points summarizing the entire video (placed at top)
-2. **逐段內容拆解** - Section-by-section breakdown with time stamps
-3. **重點數據／事實** - Key data points
-4. **結論／感想** - Conclusion
+Build the summary directly from the transcript segments (no external model calls):
+
+1. **完整摘要** — 3-5 key points extracted from the transcript text
+2. **逐段內容拆解** — Section-by-section breakdown using timestamped segments from the transcript
+3. **重點數據／事實** — Key data points extracted from the transcript
+4. **結論／感想** — Conclusion from the transcript
+5. **【全內容】最後一段的完整內容** — If the last segment is an interview, dialogue, Q&A, tutorial, code walkthrough, or any structured content type, reproduce the **full verbatim content** in this final section.
 
 ### Step 4: Upload to Gist
 
 The gist includes **two files**:
-- `summary.md` — Formatted summary (full summary at top, then sections)
+- `summary.md` — Structured summary built directly from the transcript (no external LLM)
 - `transcript.txt` — **Raw, unedited transcript** (完整原始逐字稿)
 
 ## Script Reference
@@ -84,20 +91,17 @@ python3 scripts/youtube-summary.py "https://youtube.com/watch?v=..." "Title"
 📄 TRANSCRIPT:
 [raw continuous transcription text]
 
-📋 TRANSCRIPT SEGMENTS (JSON for Qwen):
+📋 TRANSCRIPT SEGMENTS (JSON):
 [[start_s, end_s, "text"], ...]
-
-📝 SUMMARY PROMPT (for Qwen):
-[Detailed prompt requesting full summary + section-by-section breakdown]
 ```
 
 ### upload-gist.py
 
-Upload to GitHub Gist:
+Upload to GitHub Gist — **auto-detects file paths vs raw content**:
 
 ```python
-# Args: summary_md transcript_txt title
-python3 scripts/upload-gist.py "Summary..." "Transcript..." "Title"
+# Auto-detects: if arg is an existing file, reads its content; otherwise uses raw text
+python3 scripts/upload-gist.py <summary_file_or_content> <transcript_file_or_content> <title>
 ```
 
 **Output:**
@@ -108,6 +112,23 @@ python3 scripts/upload-gist.py "Summary..." "Transcript..." "Title"
 **Gist structure:**
 - `summary.md` — Formatted summary (full summary at top)
 - `transcript.txt` — Raw transcript (完整原始逐字稿)
+
+**Note:** The script always reads file content into memory before sending to the API — raw paths are never passed to GitHub. This prevents shell variable expansion issues when passing large text content as arguments.
+
+## Agent Usage Notes
+
+The entire pipeline is self-contained: download → transcribe → assemble summary from transcript segments → upload to Gist. **No calls to Qwen or any other LLM.**
+
+When uploading to Gist, **always pass the actual content, not file paths**. However, both scripts now auto-detect:
+
+| Arg type | Behavior |
+|----------|----------|
+| Existing file path | Content is read into memory, then uploaded |
+| Any other text | Treated as raw content and uploaded directly |
+
+This means the agent can safely pass either form — file paths are resolved automatically, and raw content is used as-is. **Shell variable expansion issues (e.g., `ugur-spark-vllm-docker` being treated as a command) are avoided because the scripts read content internally.**
+
+When uploading to Gist, **always pass the actual content, not file paths**. However, both scripts now auto-detect:
 
 ## Gist Output Format
 
@@ -153,7 +174,170 @@ python3 scripts/upload-gist.py "Summary..." "Transcript..." "Title"
 [結論]
 
 ---
-*Generated by youtube-summary skill*
+
+## 五、【全內容】最後一段的完整內容
+
+[如果影片最後一段是訪談、對談、Q&A、教程、程式碼演示等結構化內容，在此完整還原。]
+
+### 1. 對談／訪談類型
+
+**問**：[問題原文]
+**答**：[回答原文，含所有細節]
+
+### 2. 教程／程式碼類型
+
+[完整程式碼、步驟說明、輸出結果]
+
+### 3. Q&A 問答集
+
+**Q1**：[觀眾提問]
+**A1**：[完整回答]
+
+**Q2**：[觀眾提問]
+**A2**：[完整回答]
+
+### 4. 產品評測／開箱類型
+
+| 項目 | 詳細說明 |
+|------|---------|
+| 規格參數 | [完整規格表] |
+| 優點 | [逐項說明] |
+| 缺點 | [逐項說明] |
+| 評分 | [各面向評分 + 總分] |
+| 購買建議 | [目標族群、價格區間] |
+
+### 5. 新聞報導／深度解析類型
+
+**事件背景**：[完整背景說明]
+
+**關鍵事實**：
+- [事實 1]
+- [事實 2]
+
+**各方反應**：
+- [各方立場與原話]
+
+**影響評估**：[完整分析]
+
+### 6. 演講／Keynote 類型
+
+**主題**：[演講主題]
+
+**核心論點**：
+1. [論點 1] — [完整論述]
+2. [論點 2] — [完整論述]
+3. [論點 3] — [完整論述]
+
+**金句／重點摘錄**：
+> [直接引用原話]
+
+### 7. 理财／投資分析類型
+
+**分析標的**：[股票/基金/加密貨幣等]
+
+**基本面分析**：
+- [營收、獲利、成長率等完整數據]
+
+**技術分析**：
+- [支撐位、壓力位、均線、指標]
+
+**操作建議**：
+- [進場/出場策略、停損停利點]
+
+### 8. 運動賽事／紀錄類型
+
+**賽事資訊**：[對陣雙方、日期、地點]
+
+**逐場/逐回合記錄**：
+
+#### 第 1 節／回合
+[完整過程、關鍵時刻、得分]
+
+#### 第 2 節／回合
+[完整過程、關鍵時刻、得分]
+
+**賽後分析**：[完整戰術分析、教練選手原話]
+
+### 9. 健康／健身教學類型
+
+**教學目標**：[鍛鍊部位、預期效果]
+
+**動作分解**：
+
+| 步驟 | 動作說明 | 時間/次數 | 注意事項 |
+|------|---------|----------|---------|
+| 1 | [完整動作描述] | [時數/次數] | [關鍵要點] |
+| 2 | [完整動作描述] | [時數/次數] | [關鍵要點] |
+
+**常見錯誤**：
+- [錯誤 1] → [正確做法]
+
+### 10. 歷史紀錄／紀錄片類型
+
+**時代背景**：[完整歷史脈絡]
+
+**關鍵人物／事件**：
+- [人物 1]：[完整生平／貢獻]
+- [人物 2]：[完整生平／貢獻]
+
+**時間軸**：
+- [年份]：[事件 + 詳細說明]
+- [年份]：[事件 + 詳細說明]
+
+### 11. 音樂／歌詞解析類型
+
+**歌曲資訊**：[歌名、歌手、專輯、發行日期]
+
+**完整歌詞**：
+
+[第 1 段]
+[完整歌詞]
+
+[第 2 段]
+[完整歌詞]
+
+**創作背景**：[完整故事、靈感來源]
+
+### 12. Cooking／食譜類型
+
+**菜名**：[完整名稱]
+
+**材料清單**：
+| 食材 | 用量 | 備註 |
+|------|------|------|
+| [食材] | [精確用量] | [備註] |
+
+**步驟**：
+1. [完整步驟說明 + 時間 + 火候]
+2. [完整步驟說明 + 時間 + 火候]
+
+**關鍵技巧**：[完整秘訣說明]
+
+### 12. 旅行／Vlog 類型
+
+**地點資訊**：[完整地名、交通方式、行程日期]
+
+**逐日行程**：
+
+#### Day 1
+- [08:00] [活動 + 詳細描述 + 費用]
+- [12:00] [活動 + 詳細描述 + 費用]
+- [18:00] [活動 + 詳細描述 + 費用]
+
+**實用資訊**：
+| 項目 | 詳細內容 |
+|------|---------|
+| 住宿 | [完整名稱、價格、評價] |
+| 交通 | [詳細路線與費用] |
+| 預算 | [總花費與分配] |
+| 推薦 | [必去地點 + 理由] |
+
+**其他結構化內容類型
+
+[完整內容]
+
+---
+*Generated by youtube-summary skill (no external LLM calls)*
 ```
 
 ### transcript.txt
@@ -195,6 +379,8 @@ Override defaults when needed:
 | invalid Whisper timestamps | The worker drops empty chunks and clamps reversed/missing timestamps |
 | Gist upload fails | Token invalid or no gist scope |
 | Empty transcript | Video has no speech (music only) |
+| Gist content corrupted | Content was passed as shell args with variable expansion — now fixed: scripts auto-detect file paths vs raw content |
+
 
 ## Notes
 
@@ -204,3 +390,5 @@ Override defaults when needed:
 - Transcript is uploaded **unmodified** (完整原始逐字稿)
 - Work dir: `/tmp/youtube-summary` (cleaned up after)
 - Section breakdown uses timestamps: `⏱️ 00:00 - 01:30 【主題】`
+- **Section 5 — 全內容**：If the last segment is an interview, dialogue, Q&A, tutorial, code walkthrough, or any structured content type, reproduce the **full verbatim content** in this section. For interviews, use `**問**：` / `**答**：` format. For tutorials, include complete code/examples. This is the definitive reference section.
+- **No external LLM calls** — everything is assembled from the raw transcript directly.

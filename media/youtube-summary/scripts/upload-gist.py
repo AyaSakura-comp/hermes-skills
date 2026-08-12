@@ -2,7 +2,14 @@
 """
 Upload YouTube Summary to GitHub Gist
 ======================================
-Usage: python3 upload-gist.py <summary_md> <transcript_txt> <title>
+Usage:
+    python3 upload-gist.py <summary_md> <transcript_txt> <title>
+    python3 upload-gist.py <summary_file> <transcript_file> <title>   (auto-detect)
+
+Auto-detects whether the first two args are file paths (existing files) or
+raw content (any other text).  When file paths are detected, the content is
+read into memory so the upload-gist payload is built from the actual file
+contents — never from raw paths sent to the API.
 
 Reads GITHUB_TOKEN from ~/.hermes/.env
 """
@@ -12,6 +19,7 @@ import os
 import json
 import urllib.request
 import datetime
+import tempfile
 
 
 def read_token():
@@ -29,6 +37,14 @@ def read_token():
     return None
 
 
+def load_content(arg):
+    """Load content from a file if arg is an existing path, otherwise return arg as raw text."""
+    if os.path.isfile(arg):
+        with open(arg, "r", encoding="utf-8") as f:
+            return f.read()
+    return arg
+
+
 def upload(summary_md, transcript_txt, title):
     """Upload to GitHub Gist via raw API."""
     token = read_token()
@@ -41,6 +57,7 @@ def upload(summary_md, transcript_txt, title):
     formatted = f"""# 🎬 {title}
 
 **來源**: YouTube
+**原始連結**: {getattr(upload, '_video_url', 'https://youtube.com/watch?v=unknown')}
 **上傳時間**: {timestamp}
 
 ---
@@ -89,13 +106,14 @@ def upload(summary_md, transcript_txt, title):
 def main():
     if len(sys.argv) < 4:
         print("Usage: python3 upload-gist.py <summary_md> <transcript_txt> <title>")
+        print("       python3 upload-gist.py <summary_file> <transcript_file> <title>")
         print()
-        print("Example:")
-        print('  python3 upload-gist.py "Summary content..." "Transcript..." "Video Title"')
+        print("Auto-detects file paths vs raw content.")
         sys.exit(1)
 
-    summary = sys.argv[1]
-    transcript = sys.argv[2]
+    # Auto-detect: if the arg is an existing file, read its content; otherwise use as raw text
+    summary = load_content(sys.argv[1])
+    transcript = load_content(sys.argv[2])
     title = sys.argv[3]
 
     upload(summary, transcript, title)

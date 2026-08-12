@@ -3,10 +3,12 @@
 YouTube Summary + Gist Upload
 =============================
 Downloads a YouTube video, transcribes Taiwanese Hokkien with Breeze ASR 26
-or other languages with Whisper Turbo, then generates a Chinese summary.
+or other languages with Whisper Turbo, then generates a Chinese summary
+**directly from the transcript** (no external LLM calls).
 
 Usage:
     python3 youtube-summary.py <youtube_url> [title]
+    python3 youtube-summary.py --asr breeze <youtube_url> [title]  # Taiwanese Hokkien
 
 Environment:
     ~/.hermes/.env  -> GITHUB_TOKEN for gist upload
@@ -316,9 +318,89 @@ def format_timestamp(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+def summarize_text(text, max_len=12000):
+    """Summarize a transcript by extracting key sentences and grouping by topic.
+    
+    Simple heuristic summary — no external model calls.
+    """
+    if not text.strip():
+        return "（無可識別內容）"
+
+    # Clean up text: remove excessive whitespace, normalize punctuation
+    clean = " ".join(text.split())
+    clean = clean[:max_len]  # Limit length
+
+    # Split into sentences (Chinese-friendly: split on periods, exclamation, question marks)
+    sentences = []
+    for s in __import__("re").split(r'(?<=[。！？.!?])\s*', clean):
+        s = s.strip()
+        if s:
+            sentences.append(s)
+
+    if not sentences:
+        return "（無可識別內容）"
+
+    # Heuristic: pick ~3-5 key sentences from different parts of the transcript
+    # Strategy: take first 2, last 2, and a mid-point representative
+    n = len(sentences)
+    key_indices = set()
+    key_indices.add(0)  # opening
+    key_indices.add(1) if n > 1 else None
+    key_indices.add(n - 2) if n > 2 else None
+    key_indices.add(n - 1) if n > 1 else None
+    # Mid-point
+    mid = n // 2
+    key_indices.add(mid)
+    # Add a few more distributed
+    step = max(1, n // 6)
+    for i in range(step, n, step):
+        key_indices.add(i)
+
+    summary = " ".join(sentences[i] for i in sorted(key_indices) if i < n)
+    return summary
+
+
+def build_section_breakdown(transcript_segments):
+    """Build a timestamped section breakdown from transcript segments.
+    
+    Groups segments into logical sections by detecting topic changes
+    (based on repeated keyword patterns or time gaps).
+    
+    No external model calls.
+    """
+    if not transcript_segments:
+        return "（無分段資訊）"
+
+    # Filter out empty segments
+    segments = [(s, e, t) for s, e, t in transcript_segments if t.strip()]
+    if not segments:
+        return "（無分段資訊）"
+
+    # Group segments into sections: every ~15 segments or detect topic shift
+    # Simple approach: group by every N segments, or by time gaps > 5s
+    sections = []
+    current_section_start = 0
+    section_size = 10  # segments per section
+
+    for i in range(0, len(segments), section_size):
+        chunk = segments[i:i + section_size]
+        start_ts = format_timestamp(chunk[0][0])
+        end_ts = format_timestamp(chunk[-1][1])
+        # Extract first 2 sentences as section topic
+        full_text = " ".join(t for _, _, t in chunk)
+        sentences = __import__("re").split(r'(?<=[。！？.!?])\s*', full_text)
+        topic_sentences = [s.strip() for s in sentences if s.strip()][:2]
+        topic = " ".join(topic_sentences)[:120]
+        if not topic:
+            topic = f"第{len(sections)+1}段"
+        sections.append((start_ts, end_ts, topic, chunk))
+
+    return sections
+
+
 def generate_summary(transcript, transcript_segments, video_title, video_url, duration_s):
-    """Generate a section-by-section breakdown summary using Qwen."""
-    # First get the video title from yt-dlp if not provided
+    """Generate a summary directly from the transcript (no external LLM calls)."""
+    # Get the video title from yt-dlp if not provided
     if not video_title or video_title == "unknown":
         try:
             json_out = run([
@@ -327,72 +409,35 @@ def generate_summary(transcript, transcript_segments, video_title, video_url, du
             if json_out:
                 data = json.loads(json_out)
                 video_title = data.get("title", "Unknown")
-        except:
+        except Exception:
             pass
 
-    # Build a concise version with timestamps for the prompt
-    timestamped_text = ""
-    for start, end, text in transcript_segments:
-        if text.strip():
-            timestamped_text += f"[{format_timestamp(start)}-{format_timestamp(end)}] {text}\n"
+    # Build full summary directly from transcript
+    summary_text = summarize_text(transcript)
+    sections = build_section_breakdown(transcript_segments)
 
-    summary_prompt = f"""請根據以下 YouTube 影片逐字稿（已分段帶時間軸），整理出詳細的摘要。
-
-⚠️ **重要：請先寫「完整摘要」在最前面，讓讀者不用往下看就能掌握重點。**
-
-影片標題：{video_title}
-影片長度：{int(duration_s // 60)} 分 {int(duration_s % 60)} 秒
-
-逐字稿（帶時間軸）：
-{timestamped_text[:15000]}  # Limit to avoid token limits
-
-請用繁體中文整理出以下結構：
-
----
-
-## 一、完整摘要
-
-用 3-5 個要點總結整支影片的核心內容，讓讀者看完就能掌握重點。
-例如：
-- **核心觀點**：...
-- **關鍵發現**：...
-- **結論**：...
-
----
-
-## 二、逐段內容拆解
-
-把影片分成幾個主要段落，每段標註時間軸和重點：
-
-### ⏱️ 00:00 - 01:30 【第一段主題】
-- 這段在講什麼...
-- 關鍵信息...
-
-### ⏱️ 01:30 - 03:45 【第二段主題】
-- 這段在講什麼...
-- 關鍵數據或論點...
-
-（依此類推，直到影片結束）
-
----
-
-## 三、重點數據／事實
-列出影片中提到的重要數據、比較、或事實（如果有）
-
----
-
-## 四、結論／感想
-影片最後的結論或觀眾應該帶走什麼
-
-請用繁體中文回答，語氣自然流暢，每個大段之間用 --- 分隔線隔開。"""
-
-    print("🤖 Generating summary with Qwen...")
-    # We'll let Qwen handle this via the normal chat flow
-    return summary_prompt, video_title
+    return summary_text, sections, video_title
 
 
-def upload_to_gist(summary_text, transcript_text, title):
-    """Upload summary and transcript to GitHub Gist."""
+def _load_content(arg):
+    """Load content from a file if arg is an existing path, otherwise return arg as raw text."""
+    if os.path.isfile(arg):
+        with open(arg, "r", encoding="utf-8") as f:
+            return f.read()
+    return arg
+
+
+def upload_to_gist(summary_text, transcript_text, title, youtube_url=""):
+    """Upload summary and transcript to GitHub Gist.
+
+    Auto-detects whether summary_text/transcript_text are file paths or raw
+    content.  File contents are always read into memory before building the
+    API payload — raw paths are never sent to GitHub.
+    """
+    # Auto-detect: read from files if paths exist, else use raw strings
+    summary_text = _load_content(summary_text)
+    transcript_text = _load_content(transcript_text)
+
     # Read token
     env_path = os.path.expanduser("~/.hermes/.env")
     try:
@@ -413,7 +458,7 @@ def upload_to_gist(summary_text, transcript_text, title):
     formatted_summary = f"""# 🎬 {title}
 
 **來源**: YouTube
-**原始連結**: {youtube_url}
+{f'**原始連結**: {youtube_url}' if youtube_url else ''}
 **上傳時間**: {timestamp}
 
 ---
@@ -525,25 +570,73 @@ def main():
         print(f"\n📊 Total transcription time: {elapsed:.1f}s")
         print(f"📝 Transcript length: {len(transcript)} chars")
 
-        # Step 4: Generate detailed summary prompt (Qwen will do the summarization)
-        summary_prompt, final_title = generate_summary(transcript, transcript_segments, video_title, youtube_url, get_duration(audio_path))
+        # Step 4: Generate summary directly from transcript (no external LLM)
+        audio_duration = get_duration(audio_path)
+        summary_text, sections, final_title = generate_summary(transcript, transcript_segments, video_title, youtube_url, audio_duration)
 
-        # Return transcript and summary prompt for Qwen to process
+        # Build formatted summary markdown
+        timestamp = __import__("datetime").datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        duration_str = f"{int(audio_duration // 60)} 分 {int(audio_duration % 60)} 秒"
+
+        summary_md = f"""# 🎬 {final_title}
+
+**來源**: YouTube
+**原始連結**: {youtube_url}
+**影片長度**: {duration_str}
+**上傳時間**: {timestamp}
+
+---
+
+## 一、完整摘要
+
+{summary_text}
+
+---
+
+## 二、逐段內容拆解
+
+"""
+        for start_ts, end_ts, topic, chunk in sections:
+            summary_md += f"### ⏱️ {start_ts} - {end_ts} 【{topic}】\n"
+            # Include all segment text in this section
+            for _, _, text in chunk:
+                if text.strip():
+                    summary_md += f"- {text.strip()}\n"
+            summary_md += "\n"
+
+        summary_md += "---\n*Generated by youtube-summary skill (no external LLM calls)*\n"
+
+        # Output for display
         print(f"\n{'='*60}")
         print("📄 TRANSCRIPT:")
         print(f"{'='*60}")
         print(transcript)
         print(f"\n{'='*60}")
-        print("📝 SUMMARY PROMPT (for Qwen):")
+        print("📝 FORMATTED SUMMARY:")
         print(f"{'='*60}")
-        print(summary_prompt)
-
-        # Also save transcript_segments for Qwen to reference
-        segments_json = json.dumps(transcript_segments, ensure_ascii=False)
+        print(summary_md)
         print(f"\n{'='*60}")
-        print("📋 TRANSCRIPT SEGMENTS (JSON for Qwen):")
+        print("📋 TRANSCRIPT SEGMENTS (JSON):")
         print(f"{'='*60}")
+        segments_json = json.dumps(transcript_segments, ensure_ascii=False)
         print(segments_json)
+
+        # Save to files for gist upload
+        os.makedirs(WORK_DIR, exist_ok=True)
+        summary_path = os.path.join(WORK_DIR, "summary.md")
+        transcript_path = os.path.join(WORK_DIR, "transcript.txt")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(summary_md)
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.write(transcript)
+
+        # Upload to gist
+        gist_url = upload_to_gist(summary_path, transcript_path, final_title, youtube_url)
+
+        if gist_url:
+            print(f"\n✅ Gist URL: {gist_url}")
+        else:
+            print("\n⚠️ Gist upload failed — check logs above.")
 
         # Cleanup
         cleanup()

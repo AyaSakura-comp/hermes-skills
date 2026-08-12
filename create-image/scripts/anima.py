@@ -35,6 +35,13 @@ ANIMA_VAE = "qwen_image_vae.safetensors"
 ANIMA_LORA = "gpt-image-2_anima-base1_v1-1.safetensors"
 ANIMA_TRIGGER = "@gpt-image-2, "
 
+# AniAni LoRA for improved anatomy (especially hands/feet) - Civitai 998349
+# v0.2: "at least 1/4 of the time the hands and feet are drawn correctly"
+# Trigger: "Anime style illustration with masterpiece quality"
+ANIANI_LORA = "aniani_score9_anime_v02.safetensors"
+ANIANI_TRIGGER = "anime style illustration with masterpiece quality, "
+ANIANI_STRENGTH = 0.75
+
 # PVC figure style: this Anima version (Civitai 338712 / v2998722) is a full fine-tuned
 # CHECKPOINT (~4 GB DiT), not a LoRA — so for PVC we SWAP the base diffusion model to it and
 # keep the @gpt-image-2 LoRA on top.
@@ -352,6 +359,10 @@ def _run_anime_with_comfy(args, t_all: float, ready_seconds: float) -> int:
     unet = ANIMA_UNET
     loras = [(ANIMA_LORA, lora_strength)]
     trigger = ANIMA_TRIGGER
+    # AniAni LoRA for better anatomy (hands/feet) - Civitai 998349
+    if (Path(COMFY_DIR) / "models" / "loras" / ANIANI_LORA).exists():
+        loras.append((ANIANI_LORA, ANIANI_STRENGTH))
+        trigger = trigger + ANIANI_TRIGGER
     if any(k in pl or k in args.prompt for k in PVC_KEYWORDS):
         unet = PVC_UNET
         trigger = ANIMA_TRIGGER + PVC_TRIGGER

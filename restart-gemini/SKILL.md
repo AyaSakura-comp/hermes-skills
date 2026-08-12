@@ -21,8 +21,27 @@ or the user says「重啟 gemini / antigravity / lazygravity」.
 bash ~/.hermes/skills/restart-gemini/scripts/restart.sh
 ```
 
-Idempotent: safe to run anytime. Add `--no-bot` to leave the Discord bot untouched
-(only fix Xvfb + Antigravity). Then tell the user to retry the workspace command in Discord.
+Idempotent: safe to run anytime. Flags: `--no-bot` leaves the Discord bot untouched
+(only fixes Xvfb + Antigravity); `--no-clean` keeps orphan blank windows instead of
+closing them. Then tell the user to retry the workspace command in Discord.
+
+## Not every failure is a restart problem
+
+**Read step [5/5] of the output before telling the user to retry.** A restart fixes a
+dead/frozen IDE. It cannot fix a *stale binding*, and the two look nothing alike:
+
+| Discord error | Meaning | Fix |
+|---|---|---|
+| `Workbench page for workspace "X" not found within 30 seconds` | Antigravity/Xvfb down | this skill |
+| `Timeout calling CDP method Runtime.enable` | renderers frozen (GPU process died) | this skill (step 2 auto-retries) |
+| `Failed to activate session "X" after N attempt(s) (direct: Chat title not found in side panel; past: Conversation not found in Past Conversations)` | **the conversation is gone from Antigravity** | **`/new` in that channel** — restarting is useless |
+
+The third case is real: on 2026-07-21 all 7 named sessions in `antigravity.db` were
+stale — Past Conversations held ~22 chats, none newer than ~1 month and **none labeled
+`src`** — while the stack itself was perfectly healthy. Bot-created conversations do not
+survive in the history the way workspace-opened ones do, so bindings rot silently.
+Step [5/5] (`check_sessions.cjs`) now detects this by driving the real Past Conversations
+widget per bound session, so the skill stops recommending a pointless restart.
 
 ## Why this is needed (the architecture)
 
@@ -69,8 +88,23 @@ Key facts:
    calling CDP method Runtime.enable`). **If any page hangs, the script automatically
    restarts Antigravity once more and re-probes** (2 attempts max, then tells you to
    check the GPU process: `ps -eo pid,args | grep -F -- --type=gpu-process`).
-3. Prints each unit's active state, CDP status, and the open **workbench** pages
+3. **Closes orphan blank windows** (`scripts/clean_windows.cjs`, `--close`; skip with
+   `--no-clean`). Restarts leave behind folder-less windows with an untouched new-chat
+   panel — useless to the bot (it routes by workspace) but each keeps a renderer alive.
+   On 2026-07-21 there were **32 of them holding ~20.4 GB RSS**; closing them dropped
+   Antigravity to **3.0 GB**, which matters because system-wide earlyoom SIGKILLs at
+   1.5 GB free during GPU jobs. A window counts as blank only if `document.title` is
+   *exactly* `Antigravity`, the Explorer has 0 roots, and the agent panel still shows the
+   empty composer; unresponsive pages are left alone.
+   **They come back**: Antigravity session-restores its window list, so closing them via
+   CDP does not stick across a restart — that is why this runs on every invocation
+   rather than as a one-off fix.
+4. Prints each unit's active state, CDP status, and the open **workbench** pages
    (workspaces the bot can reach, e.g. `ComfyUI - Antigravity - …`).
+5. **Verifies bound chat sessions still exist** (`scripts/check_sessions.cjs`) — see
+   "Not every failure is a restart problem" above. Reads `antigravity.db`, and for each
+   named session drives the real Past Conversations widget in that workspace's window.
+   Prints `ok` / `STALE` / `?` per session.
 
 ## Manual verification (if needed)
 
@@ -83,10 +117,26 @@ cd ~/src/LazyGravity && node dist/bin/cli.js doctor          # full check (CDP p
 To prove the chain end-to-end you can connect to a workbench page's
 `webSocketDebuggerUrl` and `Runtime.evaluate` (e.g. check `document.querySelector('.monaco-workbench')`).
 
+## Antigravity UI selectors (verified 2026-07-21)
+
+Needed by `check_sessions.cjs`; re-verify these if Antigravity updates:
+
+- Agent panel: `.antigravity-agent-side-panel`
+- Past Conversations toggle: `[data-past-conversations-toggle]` (the clock icon)
+- The conversation picker is a **custom React widget, `.jetski-fast-pick`** — *not* a
+  VS Code quick-pick. Its rows are plain `div`s, so `.monaco-list-row`,
+  `[role="option"]` and `li` all miss them (this is why LazyGravity's own
+  `buildActivateViaPastConversationsScript` fails to select a conversation).
+- Search box inside it: `input[placeholder="Select a conversation"]`; it is React-
+  controlled, so type with CDP `Input.dispatchKeyEvent` char events — setting `.value`
+  does not filter the list.
+- Empty result renders the literal text `No items found`.
+- **Beware**: typing without focusing that input first lands in VS Code's quick-open
+  overlay, which also shows "No items found" — an easy way to fake a false STALE.
+
 ## Notes / caveats
 
-- Antigravity is a plain detached process, **not** a systemd unit. If it dies, the same
-  failure recurs — re-run this skill. (If the user wants it auto-restarting, wrap it in a
-  `systemd --user` unit with `Environment=DISPLAY=:99` and `Restart=always`.)
+- (Outdated note removed: Antigravity *is* a `systemd --user` unit now —
+  `lazygravity-antigravity.service`, `Restart=always` — see the table above.)
 - Workspaces live under `WORKSPACE_BASE_DIR=~/src` (e.g. `~/src/ComfyUI`).
 - Don't kill CDP **9222** — that's Hermes's Chrome, not Antigravity.

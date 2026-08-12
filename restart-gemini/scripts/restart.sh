@@ -8,7 +8,9 @@
 #   lazygravity-bot.service        -> Discord bot (DISPLAY=:99), ordered After antigravity
 #   lazygravity-autoapprove.service-> clicks "Always Allow" browser prompts
 #
-# Usage: restart.sh [--no-bot]   (--no-bot: only restart Xvfb + Antigravity)
+# Usage: restart.sh [--no-bot] [--no-clean]
+#   --no-bot   : only restart Xvfb + Antigravity
+#   --no-clean : keep orphan blank windows instead of closing them
 set -uo pipefail
 CDP_PORT="9223"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,10 +44,20 @@ renderers_alive(){
 
 echo "== restart-gemini =="
 
-log "[1/3] restart"
-do_restart "${1:-}"
+# flags can arrive in any order
+WANT_CLEAN=1
+RESTART_ARG=""
+for a in "$@"; do
+  case "$a" in
+    --no-clean) WANT_CLEAN=0 ;;
+    --no-bot)   RESTART_ARG="--no-bot" ;;
+  esac
+done
 
-log "[2/3] renderer liveness probe (real Runtime.evaluate, not just HTTP)"
+log "[1/5] restart"
+do_restart "$RESTART_ARG"
+
+log "[2/5] renderer liveness probe (real Runtime.evaluate, not just HTTP)"
 if renderers_alive; then
   log "renderers: all alive"
 else
@@ -61,7 +73,14 @@ else
   fi
 fi
 
-log "[3/3] verifying units..."
+log "[3/5] orphan blank windows"
+if [ "$WANT_CLEAN" = "1" ]; then
+  node "$SCRIPT_DIR/clean_windows.cjs" --close 2>&1 | sed 's/^/      /'
+else
+  node "$SCRIPT_DIR/clean_windows.cjs" 2>&1 | sed 's/^/      /'
+fi
+
+log "[4/5] verifying units..."
 for u in openclaw-xvfb lazygravity-antigravity lazygravity-bot lazygravity-autoapprove; do
   printf '      %-26s %s\n' "$u" "$(systemctl --user is-active ${u}.service)"
 done
@@ -69,6 +88,11 @@ if cdp_up; then log "CDP ${CDP_PORT}: responding"; else log "CDP ${CDP_PORT}: DO
 curl -sf "http://localhost:${CDP_PORT}/json/list" 2>/dev/null \
   | python3 -c "import sys,json;d=json.load(sys.stdin);ps=[p.get('title') for p in d if p.get('type')=='page' and 'workbench' in (p.get('url') or '')];print('\n'.join('      workbench: '+t for t in ps) or '      (no workbench page yet)')" 2>/dev/null
 
+log "[5/5] bound chat sessions still exist in Antigravity?"
+node "$SCRIPT_DIR/check_sessions.cjs" 2>&1 | sed 's/^/    /'
+
 echo
 echo "Done. Retry the workspace command in Discord."
+echo "If a session is reported STALE above, restarting again will NOT help —"
+echo "run /new in that Discord channel to bind a fresh session."
 echo "Full check: cd ~/src/LazyGravity && node dist/bin/cli.js doctor"

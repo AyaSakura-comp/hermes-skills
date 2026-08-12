@@ -124,6 +124,50 @@ api_key = browser_console(expression="document.querySelector('code')?.textConten
 # Parse the Bearer token from the output
 ```
 
+### Step 6 — Automatically configure both agents
+
+After extracting the key, export it and run this synchronisation snippet. It updates both Hermes and Pi agent configuration files, replacing an existing key without creating duplicates:
+
+```bash
+export FIRECRAWL_API_KEY='<extracted-fc-key>'
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+key = os.environ["FIRECRAWL_API_KEY"]
+if not key.startswith("fc-"):
+    raise SystemExit("FIRECRAWL_API_KEY must start with fc-")
+
+# Hermes reads this dotenv file.
+env_path = Path.home() / ".hermes" / ".env"
+env_path.parent.mkdir(parents=True, exist_ok=True)
+lines = env_path.read_text().splitlines() if env_path.exists() else []
+lines = [line for line in lines if not line.startswith("FIRECRAWL_API_KEY=")]
+lines.append(f"FIRECRAWL_API_KEY={key}")
+env_path.write_text("\n".join(lines) + "\n")
+env_path.chmod(0o600)
+
+# Pi's Firecrawl extension reads this JSON file.
+pi_path = Path.home() / ".pi" / "agent" / "extensions" / "firecrawl.json"
+pi_path.parent.mkdir(parents=True, exist_ok=True)
+config = json.loads(pi_path.read_text()) if pi_path.exists() else {
+    "url": "https://api.firecrawl.dev",
+    "headers": None,
+    "tools": ["firecrawl_scrape", "firecrawl_map", "firecrawl_search"],
+    "timeoutMs": 30000,
+    "maxBytes": 51200,
+    "maxLines": 2000,
+}
+config["apiKey"] = key
+pi_path.write_text(json.dumps(config, indent=2) + "\n")
+pi_path.chmod(0o600)
+print(f"Updated {env_path} and {pi_path}")
+PY
+```
+
+Restart existing Hermes/Pi processes so they reload the new credentials, then verify with a minimal Firecrawl API request.
+
 ## Notes
 
 - **mail.tm** is preferred over temp-mail.org because its API is fully accessible (no Cloudflare block) and supports programmatic email reading.

@@ -1,76 +1,93 @@
 ---
 name: llama-server-mtp-management
-description: Manage the custom llama-server with MTP (Multi-Token Prediction) running on port 8001.
-version: 1.0.0
+description: Manage the systemd-hosted Qwen llama.cpp MTP server on port 8001; defer FlashHead deployment and verification to restart-qwen-mtp.
+version: 2.0.0
 author: Hermes Agent
 license: MIT
 metadata:
   hermes:
-    tags: [llama-server, mtp, qwen, local-llm, process-management]
+    tags: [llama-server, systemd, mtp, qwen, flashhead, local-llm]
 ---
 
-# llama-server MTP Management
+# Qwen llama-server MTP management
 
-This skill provides the procedure for managing the custom `llama-server` instance that uses Multi-Token Prediction (MTP). This instance is run as a standalone process under the user account, NOT as a systemd service.
+Qwen MTP now runs under **systemd**. Historical instructions that started `/home/chihmin/llama-mtp/build/bin/llama-server` as a user background process are obsolete and must not be used.
 
-## Dual Inference Server Architecture
+## Current service
 
-The user runs **two** inference servers simultaneously. This is a common source of confusion:
+| Item | Value |
+|---|---|
+| Service | `qwen-mtp.service` |
+| API | `http://127.0.0.1:8001` |
+| Alias | `qwen3.6-35b-q4` |
+| Context | 260,000 |
+| Unit | `/etc/systemd/system/qwen-mtp.service` |
+| Drop-ins | `/etc/systemd/system/qwen-mtp.service.d/*.conf` |
+| Log | `/tmp/qwen35-server.log` and systemd journal |
 
-| Server | Port | What it serves | How to verify |
-|---|---|---|---|
-| **llama.cpp MTP** (PRIMARY) | `8001` | Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (22 GB) — this is the model actually used by the agent | `curl -s http://127.0.0.1:8001/v1/models` |
-| **Ollama** (secondary) | `11434` | Gemma 4 variants (e2b, e4b, 26b, 31b) + Qwen3.6-35B-A3B-Q8_0 | `curl -s http://localhost:11434/api/tags` |
+The effective model and binary are selected by lexically ordered systemd drop-ins. Never assume the base unit's `ExecStart` is live; inspect `systemctl show` and `/proc/<pid>`.
 
-**Pitfall:** Always verify which server is actually serving the model in use. Do NOT assume Ollama is the primary inference engine — llama.cpp MTP on port 8001 is the default for this session.
+## Canonical workflow
 
-## Server Specifications
-- **Binary Path:** `/home/chihmin/llama-mtp/build/bin/llama-server`
-- **Default Port:** `8001`
-- **Model Path:** `/home/chihmin/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (22 GB)
-- **MMProj Path:** `/home/chihmin/models/mmproj.gguf` (861 MB, multimodal projector)
-- **Log File:** `/tmp/qwen35-server.log`
+For any Qwen start, restart, health problem, or FlashHead request, load and follow:
 
-## Management Workflows
-
-### 1. Check if Server is Running
-Since it is not a systemd service, use `ps` to find the process:
-```bash
-ps aux | grep "[l]lama-server"
+```text
+/home/chihmin/.pi/agent/skills/restart-qwen-mtp/SKILL.md
 ```
 
-### 2. Stopping the Server
-Identify the PID from the check above and kill it:
+Verified variant selection and restart:
+
 ```bash
-kill <PID>
+HELPER=/home/chihmin/.pi/agent/skills/restart-qwen-mtp/scripts/restart-qwen-mtp.sh
+$HELPER                  # default: draft + target all-FlashHead
+$HELPER flashhead        # explicit all-FlashHead (approximate target)
+$HELPER draft-flashhead  # FlashHead draft with dense target verifier
+$HELPER f16-baseline     # dense draft and target heads with F16 KV
 ```
 
-### 3. Starting the Server
-Use the following command to start the server with the established MTP and hardware acceleration parameters:
+The helper manages the final systemd drop-in and verifies that the live executable, GGUF, HIP library, FlashHead state, and F16 KV match the requested variant.
+
+Basic operations:
+
 ```bash
-/home/chihmin/llama-mtp/build/bin/llama-server \
-  -m /home/chihmin/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf \
-  --port 8001 \
-  --host 0.0.0.0 \
-  -ngl 99 \
-  -fit off \
-  -fa 1 \
-  -c 1048576 \
-  -np 4 \
-  --mmproj /home/chihmin/models/mmproj.gguf \
-  --alias qwen3.6-35b-q4 \
-  --spec-type mtp \
-  --spec-draft-n-max 3 \
-  --log-file /tmp/qwen35-server.log &
+sudo systemctl start qwen-mtp.service
+sudo systemctl stop qwen-mtp.service
+sudo systemctl restart qwen-mtp.service
+systemctl status qwen-mtp.service --no-pager -l
+journalctl -u qwen-mtp.service -n 120 --no-pager
 ```
 
-### 4. Restarting the Server
-To restart, combine stop and start:
-1. `PID=$(pgrep -f "llama-server")`
-2. `kill $PID`
-3. Execute the start command above.
+## Inspect the live server
 
-## Pitfalls & Notes
-- **Systemd Confusion:** The user may attempt `systemctl restart llama-server`, which will fail because the server is a user-level background process, not a systemd unit.
-- **Log Inspection:** If the server fails to start or behaves unexpectedly, check the log at `/tmp/qwen35-server.log`.
-- **Resource Usage:** This server uses significant VRAM (`-ngl 99`) and a very large context window (`-c 1048576`). Ensure system resources are available before starting.
+```bash
+systemctl show qwen-mtp.service -p MainPID -p ExecStart -p Environment -p DropInPaths
+pid=$(systemctl show -p MainPID --value qwen-mtp.service)
+readlink -f /proc/$pid/exe
+grep -m1 'libggml-hip' /proc/$pid/maps
+curl -fsS http://127.0.0.1:8001/health
+curl -fsS http://127.0.0.1:8001/v1/models | jq '.data[0] | {id, context: .meta.n_ctx}'
+```
+
+If FlashHead is selected, additionally require:
+
+```bash
+grep 'FlashHead tables found' /tmp/qwen35-server.log | tail -1
+```
+
+The current verified draft + target FlashHead deployment is:
+
+```text
+/home/chihmin/llama-mtp-deploy/gfx1151-all-flashhead-15bd9b0028
+```
+
+All-FlashHead requires both `LLAMA_FLASHHEAD_PROBES=256` and `LLAMA_FLASHHEAD_TARGET=1`; the target path is approximate. The selector validates the startup warning and can restore exact dense target verification with `draft-flashhead`.
+
+See `restart-qwen-mtp/SKILL.md` for variant commands, exact drop-ins, immutable-deployment procedure, verification, guardrails, and switching back to the dense F16-KV baseline.
+
+## Guardrails
+
+- Do not use `nohup`, `&`, tmux, or direct `llama-server` launch for production Qwen.
+- Do not kill arbitrary `llama-server` PIDs; manage `qwen-mtp.service` explicitly.
+- Do not start a standalone server on port 8001.
+- Do not infer the running variant from a process name or model alias; verify effective `ExecStart`, mapped HIP library, and FlashHead load line.
+- Keep the performance power profile for production Qwen.

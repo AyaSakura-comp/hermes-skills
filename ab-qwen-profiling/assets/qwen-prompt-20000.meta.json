@@ -1,0 +1,33 @@
+{
+  "label": "qwen_20k_prompt",
+  "model": "qwen3.6-35b-q4",
+  "prompt_tokens": 20000,
+  "completion_tokens": 256,
+  "finish_reason": "length",
+  "ttft_s": 26.0605683689937,
+  "elapsed_s": 29.94095077799284,
+  "external_decode_tps": 65.9728792209502,
+  "server_prefill_ms": 26028.63,
+  "server_prefill_tokens": 20000,
+  "server_prefill_tps": 768.38,
+  "server_decode_ms": 3880.72,
+  "server_decode_tokens": 256,
+  "server_decode_tps": 65.97,
+  "mtp_acceptance": 1.0,
+  "mtp_accepted": 159,
+  "mtp_generated": 159,
+  "prefill": {
+    "samples": 129,
+    "power_avg_w": 138.24308527131782,
+    "power_max_w": 151.07,
+    "gpu_avg": 100,
+    "cpu_cores_avg": 1.8076029801259952
+  },
+  "decode": {
+    "samples": 19,
+    "power_avg_w": 117.63747368421052,
+    "power_max_w": 134.066,
+    "gpu_avg": 100,
+    "cpu_cores_avg": 1.8405351356627984
+  }
+}

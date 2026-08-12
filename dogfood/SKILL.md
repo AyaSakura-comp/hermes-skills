@@ -28,7 +28,7 @@ The user provides:
 
 ## Workflow
 
-Follow this 5-phase systematic workflow:
+Follow this 6-phase systematic workflow:
 
 ### Phase 1: Plan
 
@@ -115,7 +115,21 @@ For every issue found:
 4. Sort by severity (Critical first, then High, Medium, Low).
 5. Count issues by severity and category for the executive summary.
 
-### Phase 5: Report
+### Phase 5: Final End-to-End Visual Sweep
+
+Automated tests and DOM snapshots are not final visual proof. Before reporting:
+
+1. Return to the application's real entry point at each target viewport and theme.
+2. Traverse every primary page and take a fresh screenshot of each rendered destination.
+3. On every page, inventory every visible button, tab, menu item, card action, and link that opens a subpage, dialog, drawer, popover, expanded state, or alternate view.
+4. Click every inventoried control. After each significant interaction, take a new screenshot, inspect the actual pixels, and check the console. Do not assume a child state is correct because its parent page is correct.
+5. Scroll through long states and inspect below-the-fold content, including empty, loading, validation, and error states when safely reachable.
+6. Re-test and re-capture affected states after fixes. Continue until the interaction inventory is exhausted.
+7. Produce a screenshot set or contact sheet covering all pages and opened child states. Record explicitly what was inspected and any state that remained blocked.
+
+**Testing philosophy:** rendered reality is the final authority. Source review, unit tests, builds, and accessibility trees prove useful properties, but final acceptance requires direct end-to-end screenshot inspection of every reachable page and every child state opened by user-facing controls.
+
+### Phase 6: Report
 
 Generate the final report using the template at `templates/dogfood-report-template.md`.
 

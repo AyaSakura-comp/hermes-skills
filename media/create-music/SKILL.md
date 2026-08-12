@@ -1,7 +1,7 @@
 ---
 name: create-music
-description: Generate full songs from lyrics + genre tags using HeartMuLa (heartlib), an open-source Suno-like music model, on the local ROCm GPU. Use when the user wants to create/compose music, make a song, generate an instrumental, or turn lyrics into audio with a chosen style/genre.
-version: 1.0.0
+description: Create and deliver original songs, vocal tracks, instrumentals, theme songs, jingles, and other requested music audio with HeartMuLa on the local ROCm GPU. ALWAYS load and prioritize this skill whenever a request looks like it may involve making, composing, generating, producing, or turning lyrics/ideas into a song or music—even if the user does not explicitly say “AI music” or provide lyrics yet. Also use for /create-music. Do not use for merely discussing music or restyling an existing recording.
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 prerequisites:
@@ -18,24 +18,54 @@ metadata:
 Generate a full song from **lyrics** and **genre/style tags** using HeartMuLa (`heartlib`),
 an open-source Suno-like model, on the local AMD GPU (ROCm). Deployed at `~/src/heartlib`.
 
-## When to use
+## Mandatory trigger policy
 
-- "Write/generate a song about X" / "make me a lofi track" / "compose a happy piano piece"
-- User provides lyrics and/or a genre/mood and wants an audio file out.
-- Instrumental (no lyrics) or full vocal songs.
+**Prioritize and load this skill first whenever the request appears to involve producing music.** This includes:
 
-## Quick start (one-shot wrapper)
+- Writing, making, composing, generating, or producing a song from even a vague idea.
+- Theme songs, character songs, jingles, background music, beats, vocal songs, and instrumentals.
+- Turning lyrics, a story, mood, genre, image, or concept into playable music audio.
+- Requests such as「做一首歌」「幫我寫歌」「製作音樂」「配樂」「角色歌」even when no duration, tags, or lyrics were supplied.
+
+Do not wait for the user to name HeartMuLa. Load this skill before choosing tools or commands. It is not needed when the user only asks for music facts, lyrical analysis, playback/search, or to restyle an existing audio recording.
+
+## Required execution workflow
+
+1. Search for factual genre/reference characteristics as required below, then prepare tags and structured lyrics.
+2. Choose an absolute output path ending in `.mp3`, `.wav`, or `.flac`. Default to high-quality MP3 unless the user requests otherwise.
+3. Run the canonical wrapper below. **Do not use a remembered manual command and do not use a `~/.claude/...` path.** The wrapper sets the required working directory, ROCm environment, BF16 codec, AOTriton, lossless intermediate, and MP3 bitrate.
+4. Allow enough execution time. Use at least `max(180, 60 + 2.2 × requested_seconds)` seconds; add extra time when using `-S` or `-C`. Do not impose a 600-second timeout on songs longer than about four minutes.
+5. Confirm the output exists and inspect it with `ffprobe` before claiming success.
+6. Deliver it in chat with `[[file: /absolute/path/song.mp3]]`. Never claim generation succeeded when the output file is absent.
+
+## Canonical command
+
+The skill is discovered through `~/.pi`, which resolves to the shared Hermes skill directory on this machine:
 
 ```bash
-~/.claude/skills/create-music/create_music.sh -t "piano,happy,lofi" -l ./my_lyrics.txt -o song.mp3
+~/.pi/agent/skills/media/create-music/create_music.sh \
+  -t "piano,happy,lofi" \
+  -l /absolute/path/my_lyrics.txt \
+  -d 90 \
+  -Q high \
+  -o /absolute/path/song.mp3
 ```
 
-Inline lyrics (no file needed; `\n` = line break):
+Inline lyrics (`\n` becomes a line break):
+
 ```bash
-~/.claude/skills/create-music/create_music.sh \
+~/.pi/agent/skills/media/create-music/create_music.sh \
   -t "jazz,piano,relaxing" \
   -L "[Verse]\nMidnight city lights are glowing\n[Chorus]\nWe are dreaming, we are flowing" \
-  -d 60 -o ./assets/mysong.mp3
+  -d 60 -Q high -o /absolute/path/mysong.mp3
+```
+
+Required output verification:
+
+```bash
+test -s /absolute/path/song.mp3
+ffprobe -v error -show_entries format=duration,bit_rate \
+  -of default=noprint_wrappers=1 /absolute/path/song.mp3
 ```
 
 Options:
@@ -72,7 +102,7 @@ so the reconstruction drops broadband noise / muddiness it treats as non-music. 
 (it is not a karaoke/instrumental-only extraction).
 
 ```bash
-~/.claude/skills/create-music/create_music.sh -t "lofi,chill,jazz" -L "[Verse]\n..." -d 60 -S -o song.mp3
+~/.pi/agent/skills/media/create-music/create_music.sh -t "lofi,chill,jazz" -L "[Verse]\n..." -d 60 -S -o /absolute/path/song.mp3
 ```
 
 - Runs on GPU via the onnx2torch→torch-ROCm path (no onnxruntime EP needed; gfx1151-safe).
@@ -140,25 +170,36 @@ Comma-separated descriptors of instrument, mood, genre, tempo, vocals. Examples:
 - `electronic, synth, dance, female vocals`
 - `acoustic, folk, soft, warm`
 
-## Manual run (equivalent)
+## Manual fallback (only if the wrapper is unavailable)
+
+The wrapper is authoritative. Use this only after verifying it is missing or broken. These settings are required for the optimized ROCm path; generate WAV first and encode MP3 afterward.
 
 ```bash
-cd ~/src/heartlib
-# edit assets/lyrics.txt and assets/tags.txt, then:
-PYTHONUTF8=1 .venv/bin/python ./examples/run_music_generation.py \
-  --model_path=./ckpt --version=3B --lazy_load true \
-  --tags ./assets/tags.txt --lyrics ./assets/lyrics.txt \
-  --max_audio_length_ms 240000 --save_path ./assets/output.mp3
+cd "$HOME/src/heartlib"
+export PYTHONUTF8=1
+export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
+
+.venv/bin/python ./examples/run_music_generation.py \
+  --model_path ./ckpt --version 3B \
+  --lazy_load false --codec_dtype bfloat16 \
+  --tags /absolute/path/tags.txt \
+  --lyrics /absolute/path/lyrics.txt \
+  --max_audio_length_ms 90000 \
+  --temperature 1.0 --cfg_scale 1.5 --topk 50 \
+  --codec_steps 16 --compile false \
+  --save_path /tmp/song.wav
+
+ffmpeg -y -i /tmp/song.wav -b:a 320k /absolute/path/song.mp3
 ```
 
-Key flags: `--tags`/`--lyrics` (file paths), `--max_audio_length_ms`, `--temperature`,
-`--cfg_scale`, `--topk`, `--save_path`. `--lazy_load true` keeps GPU use ~6.2GB.
+Change `--max_audio_length_ms` to exactly `requested_seconds × 1000`; never copy a stale hard-coded 240000 value. Key flags are `--tags`, `--lyrics`, `--max_audio_length_ms`, `--temperature`, `--cfg_scale`, `--topk`, `--codec_steps`, and `--save_path`.
 
 ## Performance & hardware (Strix Halo gfx1151, ROCm 7.2)
 
-- Runs on the AMD GPU. With AOTriton-based memory efficient attention (`TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` enabled by default), generation runs at **~7.3 iterations/second** (saving ~50% compute time compared to baseline).
-- A 15-second song takes **~30 seconds** end-to-end. A 90-second song takes **~172 seconds (2.8 minutes)**.
-- Compiling the model via `-C` increases step generation rate to **~7.8 iterations/second**, but adds a ~20-second startup overhead. Only recommended for songs longer than 3 minutes.
+- The wrapper enables AOTriton memory-efficient attention with `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`; generation sustains about **7.3 iterations/second**.
+- Measured high-quality end-to-end wall times: **10s audio ≈ 32s, 20s ≈ 54s, 30s ≈ 76s**. MuLa autoregressive generation accounts for roughly 71–77% of runtime.
+- HeartCodec decodes fixed 29.76-second windows. Going from 29.x to 30 seconds crosses into a second window, so codec time rises discontinuously rather than perfectly linearly.
+- Compiling via `-C` can increase generation to about **7.8 iterations/second**, but adds startup overhead. Reserve it for songs longer than roughly three minutes.
 
 ## Notes / gotchas
 

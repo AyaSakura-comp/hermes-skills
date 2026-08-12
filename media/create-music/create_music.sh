@@ -26,8 +26,9 @@
 #               (recommended for long runs, e.g., > 3 minutes).
 #   -f SEC      Fade out duration in seconds at the end of the song (e.g., 5).
 #
-# Requires: heartlib deployed at this dir with .venv (torch 2.11+rocm7.2), ./ckpt models.
-# Notes: runs on GPU with --lazy_load (peaks ~6.2GB). Generation is ~RTF 1 (a 4min song ≈ a few min).
+# Requires: heartlib at $HEARTLIB_DIR or ~/src/heartlib with its ROCm venv and ./ckpt models.
+# Notes: the script sets the required UTF-8 and AOTriton environment and uses the optimized
+# eager-loaded MuLa + BF16 codec path. Long songs need a correspondingly long caller timeout.
 set -euo pipefail
 
 # Script lives in the skill folder; the heartlib install (venv, ./ckpt, ./examples) is elsewhere.
@@ -98,7 +99,7 @@ echo "[gen] quality=$QUALITY (mp3 $MP3_BR, codec_steps=$CSTEPS, compile=$COMPILE
   --max_audio_length_ms "$DUR_MS" \
   --temperature "$TEMP" --cfg_scale "$CFG" --topk "$TOPK" \
   --codec_steps "$CSTEPS" --compile "$COMPILE_FLAG" \
-  --save_path "$GEN_OUT" 2>&1 | grep -aviE "MIOpen|IsEnoughWorkspace" | tail -5
+  --save_path "$GEN_OUT" 2>&1 | grep --line-buffered -aviE "MIOpen|IsEnoughWorkspace"
 
 if [ "$GEN_OUT" != "$OUT" ]; then
   ffmpeg -y -i "$GEN_OUT" -b:a "$MP3_BR" "$OUT" >/dev/null 2>&1 && rm -f "$GEN_OUT"

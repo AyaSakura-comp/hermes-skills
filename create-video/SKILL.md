@@ -1,345 +1,506 @@
 ---
 name: create-video
-description: Generate a short video (with synchronized audio) from a text prompt or source image + prompt using LTX-2.3, Lightricks' 22B audio-video diffusion model, on the local ROCm GPU. Use for ANY movie/video-making request — create/generate a video, make a film/movie/short clip/trailer/MV/advertisement/animation, 拍片/做影片/做電影/做動畫, animate a scene, or turn a photo/text description into a moving image with sound. Longer pieces = generate multiple clips with this skill and stitch them with ffmpeg.
-version: 1.1.0
+description: Generate synchronized audio-video locally with MiniMax H3 Turbo on the ROCm GPU. ALWAYS use this skill whenever the user mentions generating, creating, or making animation/video—including 生成動畫、生成影片、製作動畫、製作影片、做動畫、做影片、animate、animation、video、movie、film、short clip—or mentions MiniMax H3, Minimax H3, or Hailuo H3 for video generation. Also use it to animate an image or turn a photo/text prompt into a moving image with sound.
+version: 2.1.0
 author: Hermes Agent
 license: MIT
 prerequisites:
   commands: [ffmpeg]
-  paths: [~/src/LTX-2]
+  paths: [~/src/ComfyUI]
 metadata:
   hermes:
-    tags: [video, generation, ai, ltx, ltx-2, text-to-video, image-to-video, t2v, i2v, diffusion, audio, clip]
-    related_skills: [create-music, mock-voice, restyle-music]
+    tags: [video, generation, ai, minimax, minimax-h3, hailuo-h3, comfyui, text-to-video, image-to-video, t2v, i2v, fl2va, diffusion, audio, animation]
+    related_skills: [create-image, create-music, mock-voice, restyle-music]
 ---
 
-# Create Video — LTX-2.3 text/image-to-video (with synced audio, GPU)
+# Create Video — MiniMax H3 (synchronized audio, ROCm)
 
-Generate a short video clip with **synchronized audio** from a **text prompt** or
-from a **source image + prompt** using **LTX-2.3** (Lightricks' 22B audio-video DiT),
-on the local AMD GPU (ROCm gfx1151).
-Deployed at `~/src/LTX-2`. Uses the distilled two-stage pipeline + fp8-cast quantization,
-with ROCm flash attention (AOTriton) on by default.
+Generate text-to-video and first-frame image-to-video with MiniMax H3 on the Radeon
+8060S/gfx1151 through the persistent ComfyUI service at `http://127.0.0.1:8188`.
+MiniMax H3 is the only backend in this skill.
 
 ## When to use
 
-- "Make a video of X" / "generate a short clip of …" / "animate …"
-- User gives a scene description and wants an `.mp4` out.
-- User provides a photo/image and asks to animate it with a prompt (image-to-video).
+Load this skill unconditionally when the request contains **生成動畫**, **生成影片**,
+**製作動畫**, **製作影片**, **做動畫**, **做影片**, **animate**, **animation**,
+**video**, **movie**, **film**, **short clip**, or asks for **MiniMax H3**, **Minimax H3**,
+or **Hailuo H3** moving-image generation.
 
-**Audio:** synced audio is **ON by default** and nearly free — the vocoder runs on
-CPU (see perf notes). Use `--no-audio` for silent output, e.g. when the user wants
-to score the clip with the **create-music** skill instead.
+Use it when:
 
-## Quick start (one-shot wrapper)
+- The user asks for a generated `.mp4`.
+- The user provides a still and asks to animate it.
+- The user wants synchronized ambience, SFX, dialogue, or music generated with the video.
+- A longer story should be built from several polished 3–5 second H3 segments.
+- A 2D anime request needs `/create-image` storyboard assistance before video generation.
+
+## Validated defaults
+
+| Setting | Default |
+|---|---:|
+| Resolution | 864×480 |
+| Frame rate | 24 fps |
+| Requested duration | 5 seconds |
+| Valid frames | 124 (`17k+5`) |
+| Actual duration | about 5.167 seconds |
+| Sampler | Turbo v4 step600 EMA |
+| Steps | 6 |
+| Audio | native 32 kHz stereo, on |
+| Typical wall time | about 5m25s |
+
+Use 8 Turbo steps when quality matters more than time. Use the 20-step reference sampler
+only for controlled comparisons or a shot that repeatedly fails to reach its endpoint.
+
+## Standard workflow
+
+1. Convert the request into a shared cinematic Shot Map: story beat, shot size, viewpoint
+   angle/height, simulated focal length, framing/depth of field, viewpoint movement, subject
+   movement, continuity constraints, environmental progression, sound, and intended join.
+2. For 2D anime, create horizontal storyboard/keyframe images with `/create-image`, passing
+   `--output-size` equal to the planned H3 video resolution (normally `864x480`).
+3. Verify each PNG's pixel dimensions exactly match the video canvas, then show storyboard
+   stills to the user and obtain visual approval before expensive generation.
+4. Give each H3 segment one main character action and one environmental progression.
+5. Generate one 3–5 second segment at a time.
+6. Chain longer stories using motion context when available, otherwise the previous segment's
+   actual final frame and optional FL2VA endpoint.
+7. Assemble with duplicated-context trimming and a hard join or tiny audiovisual microfade.
+8. Validate dimensions, fps, duration, video/audio streams, finite audio, visual continuity,
+   and scene evolution before delivery.
+
+## CLI
 
 ```bash
-~/.hermes/skills/create-video/create_video.sh -p "A corgi running across a sunny beach, waves splashing, slow motion" -o corgi.mp4
-
-# Animate an existing photo while following the prompt
-~/.hermes/skills/create-video/create_video.sh --image ./portrait.jpg -p "The person smiles and waves gently, subtle camera push-in" -o portrait_wave.mp4
+$HOME/.pi/agent/skills/create-video/create_video.sh \
+  -p "integrated_multimodal_description: [Shot 1] ... overall_soundscape: ... non_diegetic_music: ..." \
+  -o output.mp4
 ```
 
-Defaults: **320p 16:9 (576×320), 3 s @ 24 fps**, fp8, flash attention on.
+### Put an approved storyboard/reference image into MiniMax H3
 
-## Options
+The wrapper's `--image` option is the CLI input for an approved storyboard keyframe. It routes
+the image to H3 FL2VA as the **exact first frame and geometry anchor**; it is not a loose style
+reference. Use one clean horizontal frame generated at **exactly the same resolution as the
+planned video**—normally 864×480. A matching aspect ratio alone is not sufficient.
+
+```bash
+REF_IMAGE="/absolute/path/to/approved_storyboard_shot01_864x480.png"
+OUT="$HOME/generated/minimax-h3/shot01.mp4"
+
+$HOME/.pi/agent/skills/create-video/create_video.sh \
+  --model minimax-h3 \
+  --image "$REF_IMAGE" \
+  --resolution 864x480 \
+  --duration 5 \
+  --steps 6 \
+  --prompt "For the target video, at 0.00 seconds into the target video, Picture 1 is fully referenced. integrated_multimodal_description: [Shot 1] Preserve Picture 1's exact adult character identity, costume, horizontal composition, scene geography, landmarks, eye-level camera, and focal length. The character <one concrete action>. At the same time <one environmental change travels from foreground through mid-ground to background>. By the end <exact character and environment end state>. Traditional hand-drawn 2D cel animation; do not replace the background. overall_soundscape: <continuing ambience and action-linked sounds>. non_diegetic_music: <music development or none>." \
+  --output "$OUT"
+```
+
+Paths containing spaces are safe when enclosed in double quotes. When creating the storyboard,
+set one shared resolution variable and pass the exact same value to both tools:
+
+```bash
+VIDEO_RESOLUTION="864x480"
+STORYBOARD_DIR="$HOME/generated/minimax-h3/storyboards"
+mkdir -p "$STORYBOARD_DIR"
+
+cd "$HOME/models-work/flux2"
+source .venv-rocm72/bin/activate
+FLUX2_BIG_WMMA_LINEAR=1 python \
+  "$HOME/.pi/agent/skills/create-image/scripts/create_image.py" \
+  "Horizontal landscape 16:9 full-bleed anime image, not portrait or square. <exact shot design>" \
+  --anime --aspect-ratio 16:9 --output-size "$VIDEO_RESOLUTION" \
+  --out-dir "$STORYBOARD_DIR" --prefix shot01
+
+# Confirm the returned final_path is exactly 864x480 before using it.
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+  -of csv=s=x:p=0 "/absolute/final_path/from/create-image.png"
+
+$HOME/.pi/agent/skills/create-video/create_video.sh \
+  --image "/absolute/final_path/from/create-image.png" \
+  --resolution "$VIDEO_RESOLUTION" \
+  --prompt "For the target video, at 0.00 seconds into the target video, Picture 1 is fully referenced. <motion, environment, and sound>" \
+  --output "$HOME/generated/minimax-h3/shot01.mp4"
+```
+
+Do not generate a 1920×1080 storyboard for an 864×480 video and rely on H3 to resize it.
+Generate the storyboard at the final video canvas from the start. Use FFmpeg cropping only to
+repair legacy or externally supplied images that cannot be regenerated.
+
+Direct ComfyUI generator equivalent, for debugging the wrapper:
+
+```bash
+cd "$HOME/src/ComfyUI"
+./.venv/bin/python scripts/minimax_h3_generate.py \
+  --image "/absolute/path/to/approved_storyboard_shot01_864x480.png" \
+  --prompt "For the target video, at 0.00 seconds into the target video, Picture 1 is fully referenced. <observable motion, environment, and sound>" \
+  --width 864 --height 480 --seconds 5 --steps 6 --seed 12345 --turbo \
+  --prefix "video/storyboard_shot01" --server http://127.0.0.1:8188
+```
+
+**Multiple storyboard rule:** do not pass several unrelated storyboards into one wrapper call.
+Generate one H3 clip per approved storyboard. For a continuous segment 2, prefer clip 1's
+losslessly extracted actual final frame as segment 2's `--image`; use the next storyboard as
+a planned endpoint only in an explicitly endpoint-enabled FL2VA workflow. For a deliberate
+new viewpoint or focal length, use that storyboard as a new shot and join it with an editorial
+cut.
+
+### Options
 
 | Flag | Meaning | Default |
-|------|---------|---------|
-| `-p, --prompt` | What to generate/animate (required) | — |
-| `-i, --image` | Optional source image/photo to animate from frame 0 | — |
-| `--image-frame` | Target frame index for image conditioning | `0` |
-| `--image-strength` | Image adherence strength | `0.9` |
-| `--image-crf` | Optional conditioning image CRF (`0` = lossless) | LTX default |
-| `-d, --duration` | Clip length (seconds) | `3` |
-| `--fps` | Frames per second | `24` |
-| `-a, --aspect` | Aspect ratio when no `-r` (e.g. `9:16`, `1:1`, `4:3`) | `16:9` |
-| `-r, --resolution` | Explicit `WxH` (multiples of 64); overrides `-a` | — |
-| `--hq` | High quality: short side → 576 (e.g. `1024×576` for 16:9) | off |
-| `-o, --output` | Output `.mp4` | `./video_<ts>.mp4` |
+|---|---|---:|
+| `--model` | Compatibility selector: `minimax-h3`, `minimax`, or `h3` | `minimax-h3` |
+| `-p, --prompt` | Observable visual and audio description | required |
+| `-i, --image` | Exact first-frame image for FL2VA | none |
+| `-d, --duration` | One-shot duration; 3–5 seconds recommended | `5` |
+| `--fps` | Native fps; must remain 24 | `24` |
+| `-a, --aspect` | Aspect ratio when resolution is omitted | `16:9` |
+| `-r, --resolution` | Explicit dimensions, snapped to multiples of 32 | `864x480` |
+| `--hq` | Use a 576-pixel short side | off |
+| `-o, --output` | Output MP4 | timestamped path |
 | `--seed` | Random seed | random |
-| `--steps` | Override stage-1 denoise steps | model default |
-| `--quantization` | `fp8-cast\|fp8-scaled-mm\|bf16\|none` | `fp8-cast` |
-| `--bf16` | Disable quantization; same as `--quantization none` | off |
-| `--offload` | `none\|cpu\|disk` — ⚠️ do NOT use `cpu` on this box (UMA: GPU memory IS system RAM, offload frees nothing and only adds copies; see perf notes) | `none` |
-| `--chunk-seconds` | Auto-split clips longer than this into segments (0 = never split) | `5` |
-| `--smooth-chunks` | Use multi-keyframe overlap continuation for long clips | on |
-| `--fast-chunks` | Use old faster last-frame chunking instead of smooth continuation | off |
-| `--overlap-seconds` | Smooth chunk overlap/keyframe span | `1` |
-| `--audio` | Synced audio (default; vocoder on CPU, nearly free) | on |
-| `--no-audio` | Silent video (skip the vocoder) | — |
-| `--no-flash` | Disable flash attention (plain SDPA) | flash on |
+| `--steps` | Denoise steps | Turbo `6`, reference `20` |
+| `--turbo` | Turbo v4 sampler | on |
+| `--no-turbo` | Reference sampler | off |
+| `--audio` | Keep synchronized native stereo audio | on |
+| `--no-audio` | Strip audio from final MP4 | off |
 
-> **Audio on by default, vocoder runs on CPU.** LTX's BigVGAN-style vocoder is fp32;
-> on gfx1151 its 1D convs hit MIOpen's naive (fp64-accumulate) path and are crippled
-> (~700 s of a 10 s clip on GPU). Running the *same fp32* vocoder on the CPU is ~14×
-> faster per call (head-to-head, identical mel input: GPU-synced 18.1 s vs CPU 1.2 s;
-> outputs differ 0.2%, just fp32 rounding) — so audio costs only a few seconds total
-> (10 s clip: ~148 s with audio vs ~144 s silent). The launcher (`ltx_run.py`) does
-> this automatically. Use `--no-audio` to skip it entirely.
+## Prompt structure
 
-## Examples
-
-```bash
-# Vertical short (TikTok/Reels), 5 seconds
-create_video.sh -p "Neon city street at night, rain, reflections on the pavement, cinematic" -a 9:16 -d 5 -o street.mp4
-
-# High quality 16:9
-create_video.sh -p "A hot air balloon rising over misty mountains at dawn" --hq -o balloon.mp4
-
-# Explicit resolution + square
-create_video.sh -p "A spinning ceramic bowl on a potter's wheel" -r 384x384 -o bowl.mp4
-
-# Image-to-video: preserve the source photo, animate according to the prompt
-create_video.sh --image ./cat.jpg -p "The cat blinks, looks toward the camera, soft morning light" -d 3 -o cat_blink.mp4
-
-# Stronger/weaker image adherence
-create_video.sh --image ./landscape.png --image-strength 0.75 -p "Clouds drift slowly over the mountains" -o landscape_motion.mp4
-
-# Higher-memory bf16/no-quant mode instead of default fp8-cast
-# (no --offload: this UMA box gains nothing from CPU offload — free memory instead)
-create_video.sh --image ./cat.jpg -p "The cat slowly blinks" --bf16 -o cat_bf16.mp4
-```
-
-## Prompting tips (LTX-2.3 — official Lightricks guidance)
-
-Write **one flowing paragraph, present tense**, like a cinematographer's shot description.
-Be literal and specific — LTX-2.3 rewards detail. Follow this **official ordering**:
-
-1. **Establish the shot** — cinematography terms for the genre (e.g. *cinematic sci-fi
-   establishing shot, anamorphic wide lens, shallow depth of field, macro lens, low angle*).
-2. **Set the scene** — lighting, color palette, textures, atmosphere (*golden hour,
-   rim light, neon glow, teal-and-amber palette, volumetric haze, drifting particles, fog*).
-3. **Describe the action** — the core motion, flowing naturally, one main action.
-4. **Define the character/subject** — age, clothing, distinguishing features.
-5. **Camera movement** — explicit motion verbs: *slow dolly-in, pan, track, tilt up,
-   push in / pull back, orbit/circle around, handheld tracking, crane/overhead*. A concrete
-   move ("slow dolly-in") is far more stable than vague language.
-6. **Audio** — describe ambient sound, music, and any dialogue **in quotation marks**
-   (specify language/accent). 2.3's audio is strong, so it's worth a clause.
-
-**Length:** match prompt length to clip duration; keep **under ~200 words**. One main
-action per **2–3 s** of video — a short prompt on a long clip makes the model rush.
-
-**Audio prompting guideline:** LTX-2.3 generates synchronized ambience, SFX, music,
-speech, or singing when audio is enabled. Prompt audio as explicitly as visuals:
-
-- Put audio near the end in an `Audio:` clause.
-- Describe **ambience / room tone** so the model has a background bed: *quiet steakhouse
-  ambience, soft kitchen room tone, distant street traffic, wind through trees*.
-- Describe **sound effects tied to visible actions**: *knife softly scrapes ceramic as it
-  cuts, wet yolk rupture as the egg opens, thick yolk dripping sounds, fabric rustle,
-  footsteps on gravel*. Specific action-linked SFX work better than generic "good sound".
-- Describe **music as genre + instruments + intensity**: *warm low-volume jazz piano and
-  upright bass*, *minimal cinematic strings and soft piano*, *upbeat acoustic guitar and
-  light percussion*. If music is unwanted, still provide ambience/SFX and write *no music,
-  no singing*.
-- Put **spoken dialogue in quotation marks**, and specify speaker/language/delivery:
-  *A woman softly says in Mandarin: "好香。"* Keep dialogue short for clearer speech and
-  lip sync.
-- Say what you do **not** want when important: *no singing, no voiceover, no readable text,
-  no crowd chatter*.
-
-Example food audio clause:
+Use a structured multimodal prompt:
 
 ```text
-Audio: intimate steakhouse ambience, soft plate clinks, close-up knife scraping ceramic,
-wet yolk rupture as the egg opens, thick yolk dripping sounds, tender steak fibers tearing
-softly, subtle sizzling butter, warm low-volume jazz piano and upright bass, no singing,
-no voiceover.
+integrated_multimodal_description: [Shot 1] <subject, concrete action, environment,
+lighting, viewpoint, focal length, framing, camera movement, temporal progression>.
+overall_soundscape: <continuing ambience and synchronized visible SFX>.
+non_diegetic_music: <genre, instruments, development, or "none">.
 ```
 
-**Avoid:** internal emotional states (use visible physical cues instead), readable
-text/logos, complex/chaotic physics, too many characters, conflicting lighting, and vague
-prompts like "a nice video of nature". For dialogue, use short phrases with physical acting
-directions between them, not emotion labels.
+For image-to-video, begin with:
 
-For `--image` (image-to-video), describe the **motion/change and new atmosphere** while
-referencing the existing subject (*"the man stands still as the camera slowly pushes in…"*).
-`--image-strength` (default `0.9`) keeps identity/composition close to the photo; **lower it
-(≈0.6–0.8)** when you want a stronger stylistic transformation (e.g. turning a snapshot into
-a sci-fi scene) rather than a near-static animation.
+```text
+For the target video, at 0.00 seconds into the target video, Picture 1 is fully referenced.
+```
 
-See: Lightricks LTX-2.3 prompt guide — https://ltx.io/model/model-blog/ltx-2-3-prompt-guide
+Then specify what moves and changes. Do not redescribe a conflicting identity, costume,
+geometry, or viewpoint.
 
-## Resolution & frame rules
+## Cinematic Shot Map: angle, focal length, and movement
 
-- Two-stage pipeline requires width/height to be **multiples of 64** — the wrapper snaps to /64.
-- Frame count must be **8k+1** — the wrapper snaps `duration × fps` to the nearest valid count.
-- 320p 16:9 ≈ `576×320`. `--hq` 16:9 = `1024×576`.
+Before generating storyboards or clips, maintain one shared Shot Map as the source of truth.
+Do not invent independent image and video prompts: derive both from the same row.
 
-## Performance & memory (gfx1151)
+```text
+Shot/beat | duration | shot size | viewpoint angle and height | simulated focal length
+framing and depth of field | viewpoint movement | subject movement | start state | end state
+environment and light progression | screen direction/continuity | audio | next-shot join
+```
 
-The launcher (`ltx_run.py`) applies three gfx1151 fixes automatically:
+### Shot size and viewpoint angle
 
-1. **`MIOPEN_FIND_MODE=FAST`** — the big one for high res. MIOpen's default FIND
-   benchmarks candidate conv kernels at runtime on each new shape; a single 1080p
-   frame's VAE decode was **92 s of pure search** (rocprof's "naive_conv 86%" was the
-   search, not compute — actual conv is ~1.6 s). FAST uses the heuristic path → **2 s**
-   decode even cold. NEVER set `MIOPEN_FIND_ENFORCE=3` / `cudnn.benchmark` (the opposite —
-   force exhaustive search, 18× slower). `torch.compile`/triton can't help (triton conv
-   OOMs gfx1151's 64 KB LDS).
-2. **Audio vocoder on CPU** — its fp32 1D convs hit MIOpen naive+fp64 on GPU (~700 s for a
-   10 s clip); same fp32 math on CPU oneDNN (24 threads) is ~14× faster, quality identical.
-3. **Transformer load dedup** — the 22B denoise transformer is built once and kept resident
-   across stage1+stage2 (default loads it twice). Saves a fixed ~17 s/run. Auto-skipped under
-   `--offload`.
+Use shot size and viewpoint angle as separate controls:
 
-Timings (with audio, all fixes on):
-- **320p:** 1 s ≈ 67 s, 10 s ≈ ~2.5 min. Dedup is ~24% of a 2 s clip here.
-- **1080p:** 9 frames ≈ 90 s; **2 s (49 f) ≈ 8 min** — denoise-bound (stage2 ~103 s/it).
-  Breakdown (1080p 9 f): denoise 59%, model load 31%, VAE decode 10%.
-- Stage2 = the 22B joint audio-video DiT (48 blocks, video dim 4096). At few frames it's
-  **GEMM-bound** (FFN 4096→16384 + QKV = 64% of GPU); at many frames **attention-bound**
-  (quadratic in tokens). Neither is fixable on this GPU (no fp8 matmul) — reduce frames/res.
-- Default precision is `--quantization fp8-cast` to keep the 22B model within memory.
-  Use `--bf16` / `--quantization none` for bf16/no-quant comparisons; expect much higher
-  memory pressure.
-- **⚠️ Never use `--offload cpu` on this machine.** Strix Halo is UMA: "GPU memory" is
-  the same physical RAM as CPU memory (GTT). Offloading to CPU frees no memory at all —
-  it just adds host↔device copies and slows the run down. When memory is tight, actually
-  FREE memory instead: stop/shrink the big `llama-server` (qwen-mtp ctx/slots), stop
-  other GPU services, or lower resolution/frames.
-- fp8 peak ~50–55 GB; resident transformer raises peak. The box shares RAM as GTT — if a
-  large `llama-server` is running, free memory (shrink its ctx/slots) before generating.
+- **EWS/WS/full shot:** geography, full-body action, choreography, and floor contact.
+- **MS/MCU:** body language, dialogue, hand actions, and social tension.
+- **CU/ECU/insert:** expression, eye line, impact reaction, or decisive prop detail.
+- **Eye-level:** neutral human scale. **Low angle:** power or threat. **High angle:**
+  vulnerability or overview.
+- **Overhead/bird's-eye:** spatial geometry and choreography. **Worm's-eye:** extreme upward
+  force, heroic jumps, falling debris, or vertigo.
+- **Dutch angle:** instability or impact; state an observable horizon tilt, normally 10–25°,
+  instead of merely saying “Dutch angle.”
+- **Profile/three-quarter/OTS/POV/reverse:** specify which shoulder or character owns the
+  foreground, where the view looks, and the subjects' spatial relationship.
 
-### Long clips: auto-chunking (avoids OOM / earlyoom kills)
+Describe viewpoint geometry in natural language. Avoid the bare word `camera` in image prompts
+when a model may render equipment; use `viewpoint`, `view`, or `framing`. Video prompts may use
+standard cinematography terms when describing motion.
 
-Attention is **quadratic in frame count**, memory is unified GTT, and **earlyoom** kills
-processes at a 3 GB-free floor — so a single-shot long clip will OOM or get SIGTERM'd.
-The wrapper therefore **auto-splits any clip longer than `--chunk-seconds` (default 5 s)**.
-As of the continuity update, long clips default to **smooth multi-keyframe continuation**
-(`--smooth-chunks`): each continuation chunk is conditioned on multiple keyframes extracted
-from the previous chunk's final `--overlap-seconds` (default 1 s), then the duplicated
-overlap is trimmed during assembly. This is slower than simple concat but gives smoother
-seams because the next segment sees a short motion/pose sequence, not just one final frame.
-Per-segment memory stays at the ~5 s footprint. A 20 s target with 5 s chunks and 1 s overlap
-requires 5 generated chunks internally, then trims to the requested duration.
+### Simulated focal-length guide
 
-Use `--fast-chunks` to force the old quicker behavior: each next chunk is conditioned only
-on the previous segment's last frame and then concatenated. Use `--chunk-seconds 0` to force
-single-shot behaviour (only safe for short clips). Trade-off: audio is generated per-segment
-so seams may still not be perfectly continuous, and subjects can drift after the anchored
-overlap region.
+Millimetres are visual intent for generative models, not guaranteed physical calibration.
+Always pair a focal length with visible perspective cues:
 
-### When the user asks for a multi-second / multi-segment story
+| Simulated lens | Use | Observable cues to request |
+|---|---|---|
+| 14–18 mm ultra-wide | worm's-eye, extreme speed, monumental space | strong near/far scale, enlarged foreground, converging lines, edge stretch |
+| 20–24 mm wide | close action, narrow interiors, movement toward view | pronounced depth, foreground energy, readable environment |
+| 28–35 mm moderate wide | establishing, full-body combat, tracking | natural wide perspective, character plus geography |
+| 40–50 mm normal | dialogue, medium shots, neutral observation | restrained distortion, natural proportions |
+| 65–85 mm short telephoto | portrait, emotion, close-up | shallow depth, clean face, separated background |
+| 100–135 mm telephoto | standoff, pursuit, surveillance | compressed distance, stacked background planes |
+| 200 mm+ long telephoto | remote observation, extreme compression | flattened depth, narrow field of view, strong isolation |
+| Fisheye | comic aggression or surreal motion | curved edges and deliberate radial distortion |
 
-If the user asks for a longer video, a film broken into several seconds, or asks how to
-"stitch", "continue", "extend", "接起來", "拼接", or "用上一段最後一幀繼續", prefer a
-continuity-first plan instead of blindly generating one very long clip.
+Do not choose lens by shot size alone: an 18 mm close-up exaggerates the face, while an 85 mm
+close-up flatters and isolates it. For character beauty shots, prefer 50–85 mm. For dynamic
+foreshortening, prefer 14–28 mm and explicitly identify the enlarged foreground limb or prop.
+Treat 28 mm establishing, 50 mm medium, and 85 mm close views as editorial cuts, not endpoints
+to be morphed together.
 
-Practical default workflow tested on this host, and now the wrapper's default for long clips:
+### Viewpoint-movement grammar
 
-1. **Write the script as segments** (usually 5–10 s each). Each segment should contain only
-   one main action. Avoid cramming many actions into one segment; LTX will deform subjects.
-2. **Generate with overlap**, not hard cuts:
-   - Example target ≈ 9–10 s: generate `seg1` for 5 s, extract frame at `4.0s`, generate
-     `seg2` for 5 s from that frame, then crossfade overlap from `4–5s`.
-   - For longer stories, repeat: each new segment starts from a frame about 1 s before the
-     previous segment ends.
-3. **Second/later segment prompt must start with continuity constraints**, e.g.:
-   - `Continue seamlessly from the provided starting frame.`
-   - `For the first one second, keep the subject and camera almost still.`
-   - `Preserve exact pose, lighting, fur pattern/clothing, background, lens, color grading,
-      and composition.`
-   - Then describe the next action.
-4. **Choose low-motion cut points**. Do not cut while the subject jumps, turns quickly, or
-   the camera is panning fast. Prefer a blink, breath, pause, settled pose, or almost-static
-   frame.
-5. **Better than a single last frame: use multiple keyframe images if possible.** The
-   underlying LTX CLI supports repeated `--image PATH FRAME_IDX STRENGTH [CRF]`, even though
-   the simple wrapper exposes only one image. For a continuation segment, extract the last
-   second of the previous segment at several keyframes (e.g. previous `4.0s`, `4.33s`,
-   `4.67s`, `4.96s`) and condition the next segment at frames `0`, `8`, `16`, `24`. This
-   gives the model motion/pose anchors over the first second, not just a single start pose.
-6. **Stitch with video + audio crossfade** when needed. Hard concat usually exposes motion
-   reset and audio seams. Use `xfade` for video and `acrossfade` for audio. If multi-keyframe
-   conditioning aligns well, a hard join at the overlap boundary or a very short
-   `0.2–0.3s` micro-xfade can look cleaner than a long 1s xfade, which may ghost.
-7. **Be honest with the user**: overlap/crossfade/multi-keyframe conditioning improves
-   continuity but does not guarantee perfect identity or anatomy. LTX is still likely to
-   drift on animals, hands, faces, and complex motion. If quality matters, show a short test
-   first.
+For every moving shot specify **movement type + direction/path + amplitude + speed + subject
+relationship + endpoint**:
 
-The wrapper now automates this default for long clips. Use manual commands only when you need
-custom segment prompts, custom cut points, or to inspect/control every seam.
+- `slow push-in from a wide two-shot to a medium close-up, stopping before the face crops`
+- `fast side-tracking left-to-right parallel to the runner, keeping the full body centered`
+- `low 18 mm viewpoint retreats rapidly as the swordswoman lunges toward it`
+- `crane rises three metres into an overhead view, revealing the circular spell pattern`
+- `clockwise 120° orbit at constant radius while both fighters remain opposite each other`
+- `whip-pan follows the strike and resolves on the opponent's impact pose`
 
-Example commands for a manual external-overlap test:
+Available movement vocabulary includes static, pan, tilt, push/pull, tracking, side tracking,
+arc/orbit, crane/boom, pedestal, handheld, zoom, and dolly zoom. Distinguish viewpoint movement
+from subject movement. Avoid stacking more than one dominant viewpoint move and one subject
+action in a 3–5 second segment unless deliberately testing a complex shot.
+
+### Continuity checks
+
+Track these across connected shots: identity, wardrobe, prop/weapon hand, eye line, screen
+direction, character facing, ground position, scene geography, landmark placement, light
+source direction, weather, environmental state, and action phase. Preserve the 180-degree rule
+unless a motivated crossing shot visibly re-establishes geography. Every shot must have a new
+story function; do not repeat the same pose, distance, and angle without narrative purpose.
+
+For action, preserve readable causality:
+
+```text
+anticipation/charge → initiation → contact or evasion → reaction → settle/new threat
+```
+
+A single storyboard frame should depict one readable instant, not several moments at once.
+
+## Segmentation and editorial assembly plan
+
+Choose the join before generation; continuity does not mean forcing every clip through the
+previous final frame.
+
+| Relationship to next segment | First-frame source | Recommended join |
+|---|---|---|
+| Same continuous action and viewpoint | previous clip's actual final frame or motion context | remove duplicate context/frame; hard seamless join |
+| Same scene, deliberate new angle or focal length | independently approved storyboard | cut-on-action, reaction cut, match cut, or audio J/L cut |
+| New scene or time | new storyboard | motivated hard cut, ambience bridge, flash/occlusion if appropriate |
+| Fast combat montage | independent 2–3 s shots | impact cut or whip-pan cut |
+| Dialogue/emotional scene | independent 4–6 s shots | reaction cut with J/L-cut dialogue or ambience |
+| Incompatible existing clips | dedicated bridge only if spatially plausible | otherwise keep an honest editorial cut |
+
+Use 3–5 second clips by default. Split whenever there is a major change in viewpoint, focal
+length, location, dominant action, or environmental state. For each segment write:
+
+```text
+Segment N — duration/frame count; start state; one dominant action; one dominant viewpoint
+move; environment/light progression; sound progression; exact end state; continuity source;
+join type and trim/crossfade amount.
+```
+
+Assembly rules:
+
+1. Prefer motion-context continuation for a truly continuous shot; otherwise extract the
+   previous clip's lossless final frame for chained I2VA/FL2VA.
+2. Use a fresh approved storyboard for a genuine cut. Do not let the previous frame lock a new
+   angle into a weak morph.
+3. Trim duplicated motion-context time or the repeated opening frame before concatenation.
+4. Prefer a hard cut. Use only a 0.1–0.25 second audiovisual microfade when needed; never hide
+   broken geometry with a long dissolve.
+5. Preserve ambience across cuts with J/L cuts, but keep visible impact SFX synchronized.
+6. Inspect several frames before and after every join for pose, velocity, screen direction,
+   lighting, identity, audio phase, and background continuity.
+
+## MiniMax H3 operational rules
+
+- Source images should match the target aspect ratio. For the tuned path, prepare the approved
+  keyframe at exactly 864×480 because it is the first-frame geometry anchor.
+- Width and height must be divisible by 32.
+- Use native 24 fps.
+- Valid frame counts follow `17k+5`: 73 ≈ 3.04 s, 90 ≈ 3.75 s,
+  107 ≈ 4.46 s, and 124 ≈ 5.17 s.
+- Keep one primary shot/action in each segment. Describe concrete movement rather than
+  internal emotion.
+- State dialogue, ambience, visible SFX, and music explicitly. Keep dialogue short and quote
+  exact words.
+- Do not enable global SageAttention; long-sequence backend corruption has been reported.
+- Use the validated FP16 video VAE path. Do not force FP32 video VAE. Audio VAE stays FP32.
+- This host is UMA. CPU offload does not release physical memory and only adds copies.
+- Never stop or shrink `qwen-mtp.service` to make room. H3 is validated while it remains active.
+
+## Videos longer than five seconds
+
+Never force a long request into one unreliable generation. Plan it as ordered 3–5 second H3
+segments. Every segment needs:
+
+```text
+Segment N — frame count; start state; character action; environmental progression;
+camera/lens; sound development; exact end state; next context source.
+```
+
+Keep resolution, fps, identity, scene geography, screen direction, lens logic, and base art
+direction coherent across a continuous shot.
+
+### Preferred: latent and audio motion context
+
+When a compatible H3 Motion Context workflow is installed, pass the previous segment's final
+video latent and audio context into the next generation. This preserves speed, direction,
+pose trajectory, color, ambience, and sound continuity better than decoding a single frame.
+
+- Prefer 39 context frames (about 1.63 seconds) for routine continuation.
+- Use 56 frames (about 2.33 seconds) for fast or complex movement when memory permits.
+- Use 22 frames for calmer movement.
+- Keep resolution unchanged throughout the chain.
+- Continuation prompts must first preserve established movement, composition, environmental
+  state, and sound bed, then introduce the next action.
+- Trim duplicated context during assembly and inspect the exact join.
+- The simple wrapper does not claim to perform latent/audio chaining automatically.
+
+Community workflow: https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context
+
+### Portable fallback: chained I2VA/FL2VA
+
+1. Generate segment A.
+2. Extract A's actual final frame losslessly.
+3. Use it as segment B's `first_frame`.
+4. For free continuation, describe forward development. For a planned endpoint, use the next
+   approved storyboard as `last_frame` and describe one continuous path toward it.
+5. Remove the duplicated opening frame during assembly.
+6. Prefer a hard join. If required, use only a 0.1–0.25 second audiovisual microfade.
+7. Never use a long dissolve to hide incompatible poses; it produces ghosting.
+
+If independent clips already exist, generate a separate 3–5 second FL2VA bridge from clip A's
+actual final frame to clip B's first frame.
+
+### Deliberate shot changes
+
+Do not morph incompatible focal lengths or viewpoints. Use an editorial cut, cut-on-action,
+occlusion, petals, flash, or whip-pan. Preserve ambience with an audio J/L cut or tiny
+acrossfade. Frame interpolation can smooth cadence within a shot but cannot repair identity,
+pose, camera, or scene discontinuity.
+
+## 2D anime storyboards with `/create-image`
+
+For 二次元動畫, anime, cel-animation, and hand-drawn requests, use the `create-image` skill
+with Anima to design keyframes before H3 generation.
+
+1. Define exact subject ground position and screen position, body orientation, foot placement,
+   action, viewpoint side, viewpoint height, focal length, framing, fixed landmarks, and
+   entry/exit movement for every shot.
+2. **Generate every storyboard horizontally and at the exact video resolution.** Produce one
+   clean, full-frame **16:9 landscape image per shot** with `/create-image --output-size
+   864x480` for the tuned default. If the video uses another canvas, pass that exact `WxH` to
+   both `create-image --output-size` and `create_video.sh --resolution`. Never default to
+   portrait, vertical, square, panels, or a contact sheet.
+3. Begin image prompts with:
+   `Horizontal landscape 16:9 full-bleed image, not portrait or square.`
+4. Do not put panel numbers, captions, lens labels, camera diagrams, borders, or fake UI into
+   image prompts.
+5. Use non-native draft generation first. Spend native 1080p time only after art-direction
+   approval or when the user explicitly requests a final high-quality still.
+6. For hand-drawn style, specify varied ink lines, flat opaque cel colors, hard two-tone
+   shadows, and painted gouache/paper backgrounds. Exclude 3D, CGI, glossy rendering, plastic
+   skin, bloom, bokeh, volumetric effects, visible camera equipment, text, and watermarks.
+7. Establish a character master and scene map. Reuse appearance, palette, screen direction,
+   ground markers, and landmarks. Use conservative img2img for adjacent poses and inspect
+   identity, hands, feet, clothing, background, and perspective after every generation.
+8. Show stills to the user and obtain visual approval before generating video.
+9. Use same-composition adjacent keyframes as FL2VA endpoints. Treat 28 mm establishing,
+   50 mm medium, and 85 mm close views as deliberate cuts rather than forced morphs.
+10. Confirm the `create-image` JSON `final_path` has the exact target dimensions before video
+    generation. Do not silently resize a newly generated storyboard afterward; matching pixel
+    geometry must be established during storyboard generation.
+
+Image prompt skeleton:
+
+```text
+Horizontal landscape 16:9 full-bleed anime image, not portrait or square.
+<adult character design> stands <exact world position> and appears <screen position>.
+Body faces <direction>; feet and weight <placement>. Viewpoint is <side and height>,
+<focal length>, <shot size>. <Fixed landmarks and screen direction>.
+Traditional hand-drawn 2D animation keyframe, varied ink lines, flat cel colors,
+hard two-tone shadows, painted paper background. No panels, captions, text, visible
+camera, 3D, CGI, glossy rendering, bloom, bokeh, or watermark.
+```
+
+## Animation philosophy: animate the world, not only the character
+
+A successful animation is not a moving character pasted over a frozen illustration. Treat the
+character, environment, light, atmosphere, sound, and camera as one causal system. A static
+camera means stable framing, not a static world.
+
+1. **Protect invariants; animate variables.** Keep identity, costume, geography, landmarks,
+   screen direction, lens, and art direction stable. Deliberately evolve wind, grass,
+   branches, clouds, water, crowds, practical lights, shadows, weather, particles, or distant
+   activity.
+2. **Give the environment an arc.** Every segment needs an environmental beginning,
+   progression, and readable ending. The ending becomes the next segment's starting state.
+3. **Use visible cause and effect.** A spell sends a light wave across flowers; footsteps
+   disturb dust and grass; a door changes interior light. Avoid unrelated decorative motion.
+4. **Stage change through depth and time.** Describe when motion reaches foreground,
+   mid-ground, background, and landmarks. Use `begins`, `travels`, `one after another`,
+   `gradually`, and `settles` rather than listing simultaneous effects.
+5. **Keep change legible.** Prefer one dominant environmental transformation plus two or three
+   supporting motions. Too many unrelated changes cause geometry replacement and flicker.
+6. **Preserve geography during transformation.** Progressively transform the established
+   scene; never suddenly replace the background.
+7. **Let lighting tell time and emotion.** Cloud shadows, dusk shifts, lanterns, reflections,
+   and magic illumination must affect both character and environment consistently.
+8. **Make sound undergo the same event.** Continue ambience and add spatial cues in causal
+   order. Music may develop with the transformation but must not restart as an unrelated take.
+9. **Use stillness intentionally.** Held poses may contrast action, while breathing, cloth,
+   light, and atmosphere retain life.
+10. **Judge continuity as motion, not matching pixels.** Inspect velocity, direction,
+    illumination, sound, and environmental state around every join.
+
+Temporal prompt pattern:
+
+```text
+At first <stable character and environmental state>.
+Then <character action> causes <dominant environmental event>.
+The effect travels from <foreground> through <mid-ground> to <background landmark>.
+Meanwhile <two supporting motions> evolve consistently.
+By the end <character pose, lighting, environment, and sound settle into next state>.
+Preserve <identity, geography, camera, lens, and art style>; do not replace the background.
+```
+
+## Deployment and performance
+
+- ComfyUI: `~/src/ComfyUI`
+- Service: `~/.config/systemd/user/comfyui.service`
+- API: `http://127.0.0.1:8188`
+- Generator: `~/src/ComfyUI/scripts/minimax_h3_generate.py`
+- Diffusion model: `minimax_h3_fl2va_pruned_int8_convrot.safetensors`
+- Text encoder: `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`
+- Video VAE: `minimax_h3_video_vae_fp16.safetensors`
+- Audio VAE: `minimax_h3_audio_vae_fp32.safetensors`
+- Turbo LoRA: `minimax_h3_turbo_v4_step600_ema.safetensors`
+
+The gfx1151 optimization materializes contiguous Q/K/V before SDPA. On the tuned workload it
+improved sampling from about 461.6 seconds to 222 seconds and end-to-end wall time from about
+565.4 seconds to 325.2 seconds. Do not remove this optimization without an exact-shape A/B.
+
+## Validation before delivery
 
 ```bash
-BASE=/home/chihmin/generated/ltx/my_overlap_test
-mkdir -p "$BASE/seg1" "$BASE/seg2"
-
-# Segment 1: 5 seconds, no internal chunking.
-~/.hermes/skills/create-video/create_video.sh \
-  -p "SEGMENT 1 PROMPT" \
-  -d 5 -r 1280x704 --chunk-seconds 0 --seed 13001 \
-  -o "$BASE/seg1/seg1.mp4"
-
-# Use a frame 1 second before the end as the next segment's start image.
-ffmpeg -y -v error -ss 4.0 -i "$BASE/seg1/seg1.mp4" -frames:v 1 "$BASE/seg1_frame_4s.png"
-
-# Segment 2: first second should be nearly still to stabilize continuity.
-~/.hermes/skills/create-video/create_video.sh \
-  --image "$BASE/seg1_frame_4s.png" --image-strength 0.92 \
-  -p "Continue seamlessly from the provided starting frame. For the first one second, keep the subject and camera almost still, preserving exact pose, lighting, background, lens, and color grading. Then continue the next action..." \
-  -d 5 -r 1280x704 --chunk-seconds 0 --seed 13002 \
-  -o "$BASE/seg2/seg2.mp4"
-
-# Crossfade the 1-second overlap: seg1 0–5s + seg2 0–5s => final ~9s.
-ffmpeg -y -i "$BASE/seg1/seg1.mp4" -i "$BASE/seg2/seg2.mp4" \
-  -filter_complex "[0:v][1:v]xfade=transition=fade:duration=1:offset=4,format=yuv420p[v];[0:a][1:a]acrossfade=d=1:c1=tri:c2=tri[a]" \
-  -map '[v]' -map '[a]' \
-  -c:v libx264 -pix_fmt yuv420p -movflags +faststart -crf 20 -preset veryfast \
-  -c:a aac -b:a 128k "$BASE/final_overlap_xfade.mp4"
+ffprobe -v error \
+  -show_entries format=duration,size \
+  -show_entries stream=index,codec_name,codec_type,width,height,r_frame_rate,sample_rate,channels \
+  -of json output.mp4
 ```
 
-For user-facing delivery, also make a small contact sheet around the seam (`3.8s`, `4.2s`,
-`4.6s`, `5.0s`) to inspect whether the transition is acceptable before claiming it is good.
+Confirm:
 
-Multi-keyframe continuation example using the underlying LTX runner directly:
+- MP4 exists and is non-empty.
+- Video is H.264, requested dimensions, and 24 fps.
+- Native-audio output contains AAC 32 kHz stereo.
+- Decoded audio contains no NaN or Inf.
+- Beginning, middle, end, and every segment join are visually inspected.
+- Character identity, hands, feet, costume, geography, and screen direction remain coherent.
+- The environment visibly evolves rather than behaving like a frozen illustration.
+- Sound development matches visible events.
+- No long ghosting dissolve hides a broken join.
+- `comfyui.service` and protected `qwen-mtp.service` remain healthy.
 
-```bash
-# Suppose seg1.mp4 is 5s. Extract the final second as four keyframes.
-for spec in 0:4.000 8:4.333 16:4.667 24:4.958; do
-  idx=${spec%%:*}; t=${spec#*:}
-  ffmpeg -y -v error -ss "$t" -i seg1.mp4 -frames:v 1 "ref_frame_${idx}.png"
-done
+## Sources
 
-# Generate seg2 with those keyframes pinned to frames 0/8/16/24. CRF 0 keeps the
-# conditioning images lossless.
-cd /home/chihmin/src/LTX-2
-env PYTHONUTF8=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1 \
-  MIOPEN_FIND_MODE=FAST MIOPEN_USER_DB_PATH=/home/chihmin/.cache/miopen-ltx \
-  /home/chihmin/src/LTX-2/.venv/bin/python /home/chihmin/.hermes/skills/create-video/ltx_run.py \
-    --distilled-checkpoint-path /home/chihmin/src/LTX-2/models/ltx/ltx-2.3-22b-distilled-1.1.safetensors \
-    --spatial-upsampler-path /home/chihmin/src/LTX-2/models/ltx/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-    --gemma-root /home/chihmin/src/LTX-2/models/gemma-3-12b-it \
-    --prompt "Continue seamlessly from the provided sequence of starting keyframes. The first second should follow the provided keyframes closely, preserving exact motion, pose, lighting, background, lens, and color grading. Then continue the next action..." \
-    --height 704 --width 1280 --num-frames 121 --frame-rate 24 \
-    --seed 13012 --output-path seg2.mp4 --quantization fp8-cast \
-    --image ref_frame_0.png 0 0.95 0 \
-    --image ref_frame_8.png 8 0.95 0 \
-    --image ref_frame_16.png 16 0.95 0 \
-    --image ref_frame_24.png 24 0.95 0
-
-# If seg2 frame 0 corresponds to seg1 at 4.0s, build final as seg1[0:4] + seg2.
-ffmpeg -y -i seg1.mp4 -i seg2.mp4 \
-  -filter_complex "[0:v]trim=0:4,setpts=PTS-STARTPTS[v0];[0:a]atrim=0:4,asetpts=PTS-STARTPTS[a0];[1:v]setpts=PTS-STARTPTS[v1];[1:a]asetpts=PTS-STARTPTS[a1];[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]" \
-  -map '[v]' -map '[a]' -c:v libx264 -pix_fmt yuv420p -movflags +faststart \
-  -crf 20 -preset veryfast -c:a aac -b:a 128k final_hardjoin.mp4
-```
-
-Tested result note: on the cat overlap experiment, conditioning frames `0/8/16/24` against
-previous segment keyframes gave low frame diffs (`mean_abs_rgb` about `2–4`), proving that
-multi-keyframe conditioning does lock the first second much more strongly than a single
-start image. The subject can still drift after the anchored region.
-
-## Notes
-
-- Text encoder is Gemma-3-12b (ungated `unsloth/gemma-3-12b-it` mirror) under `~/src/LTX-2/models/`.
-- Distilled checkpoint only. The full `dev` two-stage checkpoint (best quality, +44 GB) is
-  not downloaded; add it and switch to `ltx_pipelines.ti2vid_two_stages` if needed.
-- See deploy notes / gotchas: `~/src/LTX-2` and the project memory.
-```
+- Official ComfyUI workflow: https://docs.comfy.org/tutorials/video/minimax/minimax-h3
+- Official model repository: https://huggingface.co/Comfy-Org/MiniMax-H3
+- Official prompt guide: https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md
