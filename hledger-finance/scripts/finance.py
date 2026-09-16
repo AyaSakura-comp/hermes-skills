@@ -13,9 +13,11 @@ import re
 import shlex
 import subprocess
 import sys
+import unicodedata
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -123,6 +125,169 @@ def _validate_text(value: str, label: str) -> str:
     if not cleaned:
         raise ValueError(f"{label} must not be empty")
     return cleaned
+
+
+BUILTIN_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
+    (r"(?:uber\s*eats|ubereats|foodpanda|熊貓外送)", "expenses:food:delivery"),
+    (r"(?:全聯|px\s*mart|家樂福|carrefour|costco|好市多|超市|grocery|菜市場)", "expenses:food:groceries"),
+    (r"(?:7[\s-]?11|統一超商|全家|familymart|萊爾富|ok超商)", "expenses:food:convenience"),
+    (r"(?:早餐|午餐|晚餐|便當|餐廳|拉麵|火鍋|麥當勞|肯德基|咖啡|星巴克|restaurant|cafe)", "expenses:food:dining"),
+    (r"(?:uber(?!\s*eats)|計程車|taxi|台灣大車隊)", "expenses:transport:taxi"),
+    (r"(?:高鐵|台鐵|捷運|公車|客運|thsr|railway)", "expenses:transport:transit"),
+    (r"(?:中油|台塑石油|加油|gasoline|fuel|停車|parking)", "expenses:transport:driving"),
+    (r"(?:中華電信|台灣大哥大|遠傳|水費|電費|瓦斯|網路費|電話費|internet|utility)", "expenses:utilities"),
+    (r"(?:房租|租金|管理費|rent|mortgage)", "expenses:housing"),
+    (r"(?:醫院|診所|藥局|掛號|看醫生|牙醫|medical|pharmacy)", "expenses:health"),
+    (r"(?:學費|書店|課程|補習|udemy|coursera|education|tuition)", "expenses:education"),
+    (r"(?:netflix|spotify|youtube\s*premium|disney(?:\+|\s+plus)?|訂閱|subscription)", "expenses:subscriptions"),
+    (r"(?:電影|影城|遊戲|steam|演唱會|娛樂|cinema)", "expenses:entertainment"),
+    (r"(?:momo|pchome|蝦皮|shopee|amazon|uniqlo|無印良品|網購)", "expenses:shopping"),
+    (r"(?:機票|航空|飯店|旅館|住宿|airbnb|booking(?:\.|\s*)com|travel)", "expenses:travel"),
+    (r"(?:手續費|年費|利息|fee|bank\s*charge)", "expenses:fees"),
+    (r"(?:寵物|獸醫|飼料|pet)", "expenses:pets"),
+    (r"(?:捐款|donation|慈善)", "expenses:donations"),
+)
+
+
+def _literal_description(value: str) -> str:
+    """Normalize case and width while preserving meaningful punctuation."""
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
+def _normalize_description(value: str) -> str:
+    normalized = _literal_description(value)
+    normalized = re.sub(r"\[\s*\d+\s*/\s*\d+\s*\]", " ", normalized)
+    normalized = re.sub(r"[^\w\u3400-\u9fff]+", " ", normalized, flags=re.UNICODE)
+    return " ".join(normalized.split())
+
+
+def _posting_magnitude(posting: dict) -> Decimal:
+    total = Decimal("0")
+    for amount in posting.get("pamount", []):
+        quantity = amount.get("aquantity", {})
+        if "decimalMantissa" in quantity and "decimalPlaces" in quantity:
+            value = Decimal(quantity["decimalMantissa"]).scaleb(-int(quantity["decimalPlaces"]))
+        else:
+            value = Decimal(str(quantity.get("floatingPoint", 0)))
+        total += abs(value)
+    return total
+
+
+def _history_expense_accounts(transactions: Sequence[dict]) -> list[tuple[str, str]]:
+    history: list[tuple[str, str]] = []
+    for transaction in transactions:
+        description = _normalize_description(str(transaction.get("tdescription", "")))
+        if not description:
+            continue
+        expense_postings = [
+            (index, posting)
+            for index, posting in enumerate(transaction.get("tpostings", []))
+            if (str(posting.get("paccount", "")) == "expenses" or str(posting.get("paccount", "")).startswith("expenses:"))
+        ]
+        if not expense_postings:
+            continue
+        _index, primary = max(
+            expense_postings,
+            key=lambda item: (_posting_magnitude(item[1]), -item[0]),
+        )
+        history.append((description, str(primary.get("paccount", ""))))
+    return history
+
+
+def classify_description(
+    description: str,
+    *,
+    transactions: Sequence[dict] = (),
+    rules: Sequence[dict[str, str]] = (),
+) -> dict:
+    """Choose an expense account from custom rules, history, and built-ins."""
+    cleaned = _validate_text(description, "Description")
+    literal = _literal_description(cleaned)
+    normalized = _normalize_description(cleaned)
+
+    for rule in rules:
+        pattern = _literal_description(str(rule.get("pattern", "")))
+        account = str(rule.get("account", "")).strip()
+        if not pattern or not (account == "expenses" or account.startswith("expenses:")):
+            continue
+        if pattern in literal:
+            return {
+                "account": account,
+                "source": "custom-rule",
+                "confidence": 1.0,
+                "matched": str(rule.get("pattern", "")),
+            }
+
+    best_history: tuple[float, str, str] | None = None
+    for previous_description, account in _history_expense_accounts(transactions):
+        if previous_description == normalized:
+            score = 0.99
+        elif min(len(previous_description), len(normalized)) >= 4 and (
+            previous_description in normalized or normalized in previous_description
+        ):
+            score = 0.91
+        else:
+            similarity = SequenceMatcher(None, normalized, previous_description).ratio()
+            if similarity < 0.86:
+                continue
+            score = min(0.89, similarity)
+        candidate = (score, account, previous_description)
+        if best_history is None or score >= best_history[0]:
+            best_history = candidate
+    if best_history is not None:
+        score, account, matched = best_history
+        return {
+            "account": account,
+            "source": "history",
+            "confidence": round(score, 2),
+            "matched": matched,
+        }
+
+    for pattern, account in BUILTIN_CATEGORY_RULES:
+        match = re.search(pattern, literal, flags=re.IGNORECASE)
+        if match:
+            return {
+                "account": account,
+                "source": "builtin-rule",
+                "confidence": 0.93,
+                "matched": match.group(0),
+            }
+
+    return {
+        "account": "expenses:uncategorized",
+        "source": "fallback",
+        "confidence": 0.25,
+        "matched": None,
+    }
+
+
+def _load_classification_rules(journal: Path) -> list[dict[str, str]]:
+    path = journal.parent / "classification-rules.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Invalid classification rules file {path}: {error}") from error
+    rules = payload.get("rules", []) if isinstance(payload, dict) else payload
+    if not isinstance(rules, list):
+        raise ValueError(f"Classification rules in {path} must be a list")
+    return [rule for rule in rules if isinstance(rule, dict)]
+
+
+def _load_classification_history(journal: Path) -> list[dict]:
+    result = _run(["hledger", "-f", str(journal), "print", "--output-format=json"], capture=True)
+    if result.returncode:
+        raise ValueError(result.stderr.strip() or "Could not read journal history for classification")
+    return json.loads(result.stdout)
+
+
+def _auto_debit(journal: Path, description: str) -> dict:
+    return classify_description(
+        description,
+        transactions=_load_classification_history(journal),
+        rules=_load_classification_rules(journal),
+    )
 
 
 def render_transaction(
@@ -644,6 +809,8 @@ def import_csv_transactions(
     category_column: str | None = None,
     default_installments: int = 1,
     category_prefix: str = "expenses",
+    classification_transactions: Sequence[dict] = (),
+    classification_rules: Sequence[dict[str, str]] = (),
 ) -> tuple[str, int, int]:
     output: list[str] = []
     imported = 0
@@ -657,7 +824,11 @@ def import_csv_transactions(
         try:
             txn_date = date.fromisoformat(row[date_column].strip())
             description = _validate_text(row[description_column], "Description")
-            amount = Decimal(row[amount_column].strip()).copy_abs()
+            amount = Decimal(row[amount_column].strip())
+            if amount <= 0:
+                raise ValueError(
+                    "amount must be a positive expense amount; split income/refunds or normalize direction first"
+                )
         except (KeyError, ValueError, InvalidOperation) as error:
             raise ValueError(f"Invalid CSV row {index}: {error}") from error
         count_text = (row.get(installment_column, "") if installment_column else "").strip()
@@ -666,6 +837,12 @@ def import_csv_transactions(
             raise ValueError(f"Invalid installment count on CSV row {index}")
         category = (row.get(category_column, "") if category_column else "").strip()
         debit = f"{category_prefix}:{category}" if category else default_debit
+        if debit == "auto":
+            debit = classify_description(
+                description,
+                transactions=classification_transactions,
+                rules=classification_rules,
+            )["account"]
         tags = [f"import-id:{import_id}"] if import_id else []
         output.append(
             render_installments(
@@ -767,11 +944,32 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_debit_account(journal: Path, description: str, debit: str | None) -> str:
+    if debit and debit != "auto":
+        return debit
+    _ensure_journal(journal)
+    decision = _auto_debit(journal, description)
+    print(
+        f"Auto-category: {decision['account']} "
+        f"(source={decision['source']}, confidence={decision['confidence']:.2f})",
+        file=sys.stderr,
+    )
+    return str(decision["account"])
+
+
+def command_classify(args: argparse.Namespace) -> int:
+    _ensure_journal(args.journal)
+    decision = _auto_debit(args.journal, args.description)
+    print(json.dumps(decision, ensure_ascii=False, indent=2))
+    return 0
+
+
 def command_add(args: argparse.Namespace) -> int:
+    debit = _resolve_debit_account(args.journal, args.description, args.debit)
     transaction = render_transaction(
         date.fromisoformat(args.date),
         args.description,
-        args.debit,
+        debit,
         args.credit,
         Decimal(args.amount),
         args.currency,
@@ -781,12 +979,13 @@ def command_add(args: argparse.Namespace) -> int:
 
 
 def command_installment(args: argparse.Namespace) -> int:
+    debit = _resolve_debit_account(args.journal, args.description, args.debit)
     transaction = render_installments(
         start=date.fromisoformat(args.start),
         description=args.description,
         total=Decimal(args.total),
         count=args.count,
-        debit_account=args.debit,
+        debit_account=debit,
         credit_account=args.credit,
         currency=args.currency,
         fee_per_installment=Decimal(args.fee),
@@ -814,6 +1013,8 @@ def command_import_csv(args: argparse.Namespace) -> int:
         category_column=args.category_column,
         default_installments=args.installments,
         category_prefix=args.category_prefix,
+        classification_transactions=_load_classification_history(args.journal),
+        classification_rules=_load_classification_rules(args.journal),
     )
     print(f"Rows ready: {imported}; duplicates skipped: {skipped}", file=sys.stderr)
     if not journal_text:
@@ -1091,12 +1292,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--description", required=True)
     add_parser.add_argument("--amount", required=True)
     add_parser.add_argument("--currency", default="TWD")
-    add_parser.add_argument("--debit", required=True)
+    add_parser.add_argument("--debit", required=True, help="Debit account; use 'auto' to classify an expense")
     add_parser.add_argument("--credit", required=True)
     add_parser.add_argument("--tag", action="append", default=[])
     add_parser.add_argument("--preview", action="store_true", help="Show entries without writing")
     add_parser.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
     add_parser.set_defaults(func=command_add)
+
+    classify_parser = subparsers.add_parser("classify", help="Suggest an expense category from rules and history")
+    classify_parser.add_argument("--description", required=True)
+    classify_parser.set_defaults(func=command_classify)
 
     installment_parser = subparsers.add_parser("installment", help="Create N exact monthly installments")
     installment_parser.add_argument("--start", required=True)
@@ -1104,7 +1309,7 @@ def build_parser() -> argparse.ArgumentParser:
     installment_parser.add_argument("--total", required=True)
     installment_parser.add_argument("--count", type=int, required=True)
     installment_parser.add_argument("--currency", default="TWD")
-    installment_parser.add_argument("--debit", required=True)
+    installment_parser.add_argument("--debit", default="auto", help="Debit account; default auto-classifies expenses")
     installment_parser.add_argument("--credit", required=True)
     installment_parser.add_argument("--fee", default="0", help="Fee per installment")
     installment_parser.add_argument("--fee-account", default="expenses:fees")
@@ -1124,7 +1329,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--category-column")
     import_parser.add_argument("--category-prefix", default="expenses")
     import_parser.add_argument("--installments", type=int, default=1)
-    import_parser.add_argument("--debit", default="expenses:uncategorized")
+    import_parser.add_argument("--debit", default="auto", help="Fallback debit; default auto-classifies each description")
     import_parser.add_argument("--credit", required=True)
     import_parser.add_argument("--currency", default="TWD")
     import_parser.add_argument("--preview", action="store_true", help="Show entries without writing")

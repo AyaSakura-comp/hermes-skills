@@ -1,6 +1,6 @@
 ---
 name: hledger-finance
-description: Manage personal finances with hledger through validated CLI workflows: natural-language entry, installments, CSV imports, flexible queries, statistics, Japanese-style visual dashboard images, Git history, and optional Google Drive backup. Use when the user asks to record, import, split, inspect, reconcile, report, visualize, budget, forecast, or analyze money.
+description: Manage personal finances with hledger through validated CLI workflows: natural-language entry with automatic expense categorization, installments, CSV imports, flexible queries, statistics, Japanese-style visual dashboards, Git history, and optional Google Drive backup. Use when the user asks to record, import, split, categorize, inspect, reconcile, report, visualize, budget, forecast, or analyze money.
 compatibility: Requires hledger, Python 3, git, matplotlib, Pillow, a CJK font, and optionally rclone for Google Drive backup.
 ---
 
@@ -16,7 +16,7 @@ Override journal: `hfin --journal /path/book.journal ...`
 
 ## Safety contract
 
-1. Never invent an account, amount, date, currency, installment count, or source account when materially ambiguous.
+1. Never invent an amount, date, currency, installment count, or source/payment account when materially ambiguous. Expense category is different: infer it automatically using the policy below instead of asking routinely.
 2. For relative dates, first obtain the authoritative current date, then use an explicit date or a supported period alias.
 3. Clear, unambiguous write requests are posted immediately; do not ask for routine confirmation.
 4. Use `--preview` only when the user asks to preview, when imported data is structurally uncertain, or when a material accounting choice remains ambiguous.
@@ -38,24 +38,57 @@ hfin check
 The generic model is debit/credit. Expenses debit an `expenses:*` account; income credits an `income:*` account.
 
 ```bash
-# Record an expense immediately
-hfin add --date 2026-09-16 --description "Lunch" --amount 150 \
-  --currency TWD --debit expenses:food --credit assets:cash
+# Expense: select automatic mode; the user does not need to name a category
+hfin add --date 2026-09-16 --description "全聯買菜" --amount 680 \
+  --currency TWD --debit auto --credit assets:cash
+
+# Inspect the classification without writing
+hfin classify --description "全聯買菜"
+
+# Explicit category always overrides automatic classification
+hfin add --date 2026-09-16 --description "Team lunch" --amount 1200 \
+  --currency TWD --debit expenses:work:meals --credit assets:bank
 
 # Optional dry-run when requested
 hfin add --date 2026-09-16 --description "Lunch" --amount 150 \
-  --currency TWD --debit expenses:food --credit assets:cash --preview
+  --currency TWD --debit auto --credit assets:cash --preview
 
-# Income
+# Income and transfers are not expense classification: provide both accounts explicitly
 hfin add --date 2026-09-05 --description "Salary" --amount 50000 \
   --currency TWD --debit assets:bank --credit income:salary
-
-# Transfer
 hfin add --date 2026-09-06 --description "ATM withdrawal" --amount 3000 \
   --currency TWD --debit assets:cash --credit assets:bank
 ```
 
 Repeat `--tag` for metadata, eg `--tag project:italy --tag person:me`.
+
+## Automatic expense categorization
+
+Do not ask the user to choose a category for an ordinary expense. Determine it in this order:
+
+1. Explicit user-provided `--debit` account.
+2. Literal custom merchant rule from `classification-rules.json`.
+3. Same or strongly similar historical description in the journal.
+4. Built-in Taiwan-oriented merchant and keyword rules.
+5. Qwen semantic judgment from the description and conversation context. When `hfin classify` returns `source: fallback` but the meaning is clear, choose the most specific stable `expenses:*` account and pass it explicitly.
+6. `expenses:uncategorized` only when the description is genuinely opaque; still record without interrupting the user.
+
+For ordinary expense entry, the agent must use `hfin add --debit auto` unless it already chose a more specific account semantically. Requiring the explicit `auto` marker prevents an omitted account on income, refund, or transfer from being silently posted as an expense. `hfin installment` and CSV rows without an explicit category default to automatic categorization. The CLI reports the chosen account, source, and confidence on stderr. Explicit debit accounts are never replaced.
+
+Use stable account families such as `expenses:food:groceries`, `expenses:food:dining`, `expenses:transport:taxi`, `expenses:transport:transit`, `expenses:housing`, `expenses:utilities`, `expenses:health`, `expenses:education`, `expenses:subscriptions`, `expenses:entertainment`, `expenses:shopping`, `expenses:travel`, `expenses:fees`, and `expenses:pets`. Prefer an existing historical account over creating a near-duplicate spelling.
+
+Optional custom rules live beside the journal at `~/finance/classification-rules.json`. Patterns are case-insensitive literal substrings, not executable regexes:
+
+```json
+{
+  "rules": [
+    {"pattern": "毛孩市集", "account": "expenses:pets:supplies"},
+    {"pattern": "公司午餐", "account": "expenses:work:meals"}
+  ]
+}
+```
+
+When reporting a newly recorded expense, state the selected category briefly. Do not request confirmation unless the user explicitly asks or the category materially changes accounting treatment rather than ordinary reporting.
 
 ## Installments
 
@@ -63,8 +96,8 @@ Use for any finite monthly split. The split is exact; any cent remainder goes to
 
 ```bash
 hfin installment --start 2026-10-31 --description "Phone" --total 36000 \
-  --count 12 --currency TWD --debit expenses:electronics \
-  --credit liabilities:credit-card --fee 30 --fee-account expenses:fees
+  --count 12 --currency TWD --credit liabilities:credit-card \
+  --fee 30 --fee-account expenses:fees
 ```
 
 The entries are validated, appended, and committed immediately. Add `--preview` for a dry-run. Month-end dates clamp correctly (eg Jan 31 → Feb 28/29). For formal accrual accounting versus monthly expense recognition, follow [references/ACCOUNTING.md](references/ACCOUNTING.md).
@@ -92,7 +125,7 @@ hfin import-csv purchases.csv --credit liabilities:credit-card \
   --installment-column installments --id-column id --category-column category
 ```
 
-Imports write immediately by default; add `--preview` for an uncertain file or dry-run. IDs are stored as `import-id:*` and duplicate IDs are skipped. See [references/CSV.md](references/CSV.md).
+This helper imports positive expense/purchase rows only; it rejects zero or negative amounts so income, refunds, transfers, and signed statements cannot be silently posted as expenses. Imports write immediately by default; add `--preview` for an uncertain file or dry-run. Rows with a category column use it; otherwise descriptions are classified automatically from custom rules, history, and built-ins. IDs are stored as `import-id:*` and duplicate IDs are skipped. See [references/CSV.md](references/CSV.md).
 
 ## Flexible queries
 

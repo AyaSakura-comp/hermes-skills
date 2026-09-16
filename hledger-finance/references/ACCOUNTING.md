@@ -8,6 +8,12 @@
     assets:cash                  -150 TWD
 ```
 
+## Category inference
+
+Automatic categorization applies only to ordinary expenses. Priority is explicit account, custom literal rule, matching journal history, built-in merchant/keyword rules, then agent semantic judgment. Income, transfers, refunds, receivables, loans, assets, and liabilities must use their economic posting direction instead of being forced into an expense category.
+
+Prefer stable, reusable hierarchies and existing accounts. For example, use `expenses:food:groceries` consistently rather than creating both `expenses:groceries` and `expenses:food:supermarket` for the same meaning.
+
 ## Income
 
 ```hledger

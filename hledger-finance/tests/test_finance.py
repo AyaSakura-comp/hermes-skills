@@ -21,6 +21,7 @@ from scripts.finance import (  # noqa: E402
     add_months,
     build_hledger_query,
     build_visualization_data,
+    classify_description,
     compute_stats,
     import_csv_transactions,
     parse_period,
@@ -153,6 +154,93 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(result["currencies"]["TWD"]["expense"], "150")
         self.assertEqual(result["currencies"]["TWD"]["net"], "49850")
         self.assertEqual(result["expense_categories"]["expenses:food"]["TWD"], "150")
+
+
+class ClassificationTests(unittest.TestCase):
+    def test_builtin_rules_classify_common_taiwan_merchants(self):
+        result = classify_description("全聯福利中心買菜")
+        self.assertEqual(result["account"], "expenses:food:groceries")
+        self.assertEqual(result["source"], "builtin-rule")
+        self.assertGreaterEqual(result["confidence"], 0.9)
+
+    def test_builtin_category_matrix(self):
+        cases = {
+            "Foodpanda 晚餐": "expenses:food:delivery",
+            "Uber 行程": "expenses:transport:taxi",
+            "高鐵票": "expenses:transport:transit",
+            "中華電信月租": "expenses:utilities",
+            "九月房租": "expenses:housing",
+            "大樹藥局": "expenses:health",
+            "Netflix 訂閱": "expenses:subscriptions",
+            "Disney+": "expenses:subscriptions",
+            "7-11": "expenses:food:convenience",
+            "蝦皮網購": "expenses:shopping",
+            "Booking.com": "expenses:travel",
+            "銀行手續費": "expenses:fees",
+            "寵物飼料": "expenses:pets",
+        }
+        for description, expected in cases.items():
+            with self.subTest(description=description):
+                self.assertEqual(classify_description(description)["account"], expected)
+
+    def test_custom_rules_take_priority(self):
+        result = classify_description(
+            "毛孩市集飼料",
+            rules=[{"pattern": "毛孩市集", "account": "expenses:pets:supplies"}],
+        )
+        self.assertEqual(result["account"], "expenses:pets:supplies")
+        self.assertEqual(result["source"], "custom-rule")
+
+    def test_custom_literal_punctuation_does_not_overmatch(self):
+        result = classify_description(
+            "Costco",
+            rules=[{"pattern": "C++", "account": "expenses:education:programming"}],
+        )
+        self.assertNotEqual(result["account"], "expenses:education:programming")
+
+    def test_matching_history_reuses_the_previous_expense_account(self):
+        history = [
+            {
+                "tdescription": "藍瓶咖啡 台北",
+                "tpostings": [{"paccount": "expenses:food:coffee", "pamount": []}],
+            }
+        ]
+        result = classify_description("藍瓶咖啡 台北", transactions=history)
+        self.assertEqual(result["account"], "expenses:food:coffee")
+        self.assertEqual(result["source"], "history")
+
+    def test_history_uses_the_primary_expense_not_a_small_installment_fee(self):
+        history = [
+            {
+                "tdescription": "Phone [1/12]",
+                "tpostings": [
+                    {
+                        "paccount": "expenses:electronics",
+                        "pamount": [{"acommodity": "TWD", "aquantity": {"floatingPoint": 3000}}],
+                    },
+                    {
+                        "paccount": "expenses:fees",
+                        "pamount": [{"acommodity": "TWD", "aquantity": {"floatingPoint": 30}}],
+                    },
+                ],
+            }
+        ]
+        result = classify_description("Phone", transactions=history)
+        self.assertEqual(result["account"], "expenses:electronics")
+
+    def test_latest_equal_history_match_wins_after_a_user_correction(self):
+        history = [
+            {"tdescription": "Corner Cafe", "tpostings": [{"paccount": "expenses:misc"}]},
+            {"tdescription": "Corner Cafe", "tpostings": [{"paccount": "expenses:food:coffee"}]},
+        ]
+        result = classify_description("Corner Cafe", transactions=history)
+        self.assertEqual(result["account"], "expenses:food:coffee")
+
+    def test_unknown_description_uses_reviewable_fallback(self):
+        result = classify_description("XYZ-9482")
+        self.assertEqual(result["account"], "expenses:uncategorized")
+        self.assertEqual(result["source"], "fallback")
+        self.assertLess(result["confidence"], 0.5)
 
 
 class VisualizationTests(unittest.TestCase):
@@ -292,6 +380,35 @@ class ImportTests(unittest.TestCase):
         self.assertIn("; import-id:def", journal)
         self.assertNotIn("Laptop", journal)
 
+    def test_csv_import_rejects_signed_or_negative_rows_in_expense_mode(self):
+        rows = [{"date": "2026-09-17", "description": "Refund", "amount": "-980"}]
+        with self.assertRaisesRegex(ValueError, "positive expense amount"):
+            import_csv_transactions(
+                rows=rows,
+                existing_text="",
+                default_debit="auto",
+                credit_account="assets:cash",
+                currency="TWD",
+                date_column="date",
+                description_column="description",
+                amount_column="amount",
+            )
+
+    def test_csv_import_auto_classifies_rows_without_category(self):
+        rows = [{"date": "2026-09-17", "description": "全聯採買", "amount": "980"}]
+        journal, imported, skipped = import_csv_transactions(
+            rows=rows,
+            existing_text="",
+            default_debit="auto",
+            credit_account="assets:cash",
+            currency="TWD",
+            date_column="date",
+            description_column="description",
+            amount_column="amount",
+        )
+        self.assertEqual((imported, skipped), (1, 0))
+        self.assertIn("expenses:food:groceries", journal)
+
 
 class CliWriteBehaviorTests(unittest.TestCase):
     def test_add_writes_by_default_without_confirmation_flag(self):
@@ -407,6 +524,86 @@ class CliWriteBehaviorTests(unittest.TestCase):
         self.assertIn("Breakfast", text)
         self.assertNotIn("Lunch", text)
         self.assertIn("Undo finance action", log)
+
+    def test_add_requires_explicit_auto_mode_when_debit_is_omitted(self):
+        script = SKILL_DIR / "scripts" / "finance.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "main.journal"
+            base = [sys.executable, str(script), "--journal", str(journal)]
+            subprocess.run(base + ["init"], check=True, capture_output=True, text=True)
+            result = subprocess.run(
+                base
+                + [
+                    "add",
+                    "--date",
+                    "2026-09-17",
+                    "--description",
+                    "Salary",
+                    "--amount",
+                    "50000",
+                    "--credit",
+                    "income:salary",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--debit", result.stderr)
+
+    def test_add_auto_classifies_when_debit_is_auto(self):
+        script = SKILL_DIR / "scripts" / "finance.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "main.journal"
+            base = [sys.executable, str(script), "--journal", str(journal)]
+            subprocess.run(base + ["init"], check=True, capture_output=True, text=True)
+            result = subprocess.run(
+                base
+                + [
+                    "add",
+                    "--date",
+                    "2026-09-17",
+                    "--description",
+                    "全聯福利中心買菜",
+                    "--amount",
+                    "680",
+                    "--debit",
+                    "auto",
+                    "--credit",
+                    "assets:cash",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            journal_text = journal.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("expenses:food:groceries", journal_text)
+        self.assertIn("Auto-category:", result.stderr)
+
+    def test_classify_command_prefers_custom_rules_file(self):
+        script = SKILL_DIR / "scripts" / "finance.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "main.journal"
+            base = [sys.executable, str(script), "--journal", str(journal)]
+            subprocess.run(base + ["init"], check=True, capture_output=True, text=True)
+            (Path(tmp) / "classification-rules.json").write_text(
+                json.dumps(
+                    {"rules": [{"pattern": "毛孩市集", "account": "expenses:pets:supplies"}]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                base + ["classify", "--description", "毛孩市集飼料"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            decision = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(decision["account"], "expenses:pets:supplies")
+        self.assertEqual(decision["source"], "custom-rule")
 
     def test_visualize_command_generates_dashboard_for_filtered_period(self):
         from PIL import Image
