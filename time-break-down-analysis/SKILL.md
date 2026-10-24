@@ -38,6 +38,7 @@ metadata:
    python3 ~/.hermes/skills/time-break-down-analysis/scripts/plot_gantt.py \
      --jsonl <trace.jsonl> --out <abs/path/gantt.png> --title "<任務> time breakdown (<總秒數>s)"
    ```
+   一輪裡有好幾段（例如 LLM 一個 request 的影像編碼 → prefill → decode → 工具）時，每段 JSON 加上同一個 `"lane": "<輪次說明>"`，腳本就會把它們畫在同一列，可再加 `--legend '{"plan":"prefill",...}'` 標示顏色。LLM 的時間要拆到 server 端：llama-server 的 journal 有每個 request 的 `image processed in`、`prompt eval time`、`eval time`，不要把「模型思考」當成一整塊。
    比較多個版本時改用 `--versions <versions.json>`，格式是 `[{"name": "V1 (14.2s)", "spans": [{"phase", "start", "dur", "cat"}]}]`。
 4. **自己打開 PNG 看一遍**再交付，確認文字沒有變成方框、長條沒有疊在一起、步驟沒有漏掉。
 5. **交付**：先寫一句結論（最大的時間花在哪裡、占幾 %），附上依類別加總的小表，再附圖。在 Piweb／Discord 這類介面要用 `[[file: /absolute/path/gantt.png]]` 的格式附檔。

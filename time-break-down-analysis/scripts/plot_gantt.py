@@ -45,6 +45,36 @@ def get_color(name: str) -> str:
     return PALETTE["default"]
 
 
+def plot_lane_gantt(spans: List[Dict[str, Any]], title: str, output_path: str, legend: Dict[str, str] = None):
+    """Render spans that share rows: every span with the same "lane" sits on one row (e.g. one agent turn = encode+prefill+decode+tool)."""
+    lanes = []
+    for s in spans:
+        if s["lane"] not in lanes:
+            lanes.append(s["lane"])
+    fig, ax = plt.subplots(figsize=(14, max(4, len(lanes) * 0.42) + 2.0), dpi=200)
+    max_x = max(s.get("rel_start", 0.0) + s.get("duration_sec", 0.0) for s in spans)
+    for s in spans:
+        y = lanes.index(s["lane"])
+        start, dur = s.get("rel_start", 0.0), s.get("duration_sec", 0.0)
+        color = get_color(s.get("category", s.get("phase", "")))
+        ax.barh(y, dur, left=start, height=0.6, color=color, edgecolor="black", linewidth=0.5, alpha=0.92)
+        if dur >= max_x * 0.012:
+            ax.text(start + dur / 2, y, f"{dur:.1f}", va="center", ha="center", fontsize=7, color="white", fontweight="bold")
+    ax.set_yticks(range(len(lanes)))
+    ax.set_yticklabels(lanes, fontsize=9, fontweight="semibold")
+    ax.invert_yaxis()
+    ax.set_xlabel("Elapsed Time (Seconds)", fontsize=11, fontweight="bold")
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+    ax.grid(axis="x", linestyle="--", alpha=0.5)
+    if legend:
+        handles = [patches.Patch(color=get_color(cat), label=label) for cat, label in legend.items()]
+        ax.legend(handles=handles, loc="upper right", fontsize=9, framealpha=0.95)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+    print(f"✅ Lane Gantt chart saved to: {output_path}")
+
+
 def plot_single_gantt(spans: List[Dict[str, Any]], title: str, output_path: str):
     """Render a single run Gantt chart."""
     fig, ax = plt.subplots(figsize=(12, max(4, len(spans) * 0.45) + 1.5), dpi=200)
@@ -132,6 +162,7 @@ if __name__ == "__main__":
     parser.add_argument("--jsonl", help="Input JSONL file of spans")
     parser.add_argument("--out", default="gantt.png", help="Output PNG path")
     parser.add_argument("--title", default="Time Breakdown Analysis", help="Chart title")
+    parser.add_argument("--legend", help='JSON object {category: label} drawn as a legend (lane mode)')
     parser.add_argument("--versions", help="JSON file: [{name, spans:[{phase,start,dur,cat}]}] for a stacked comparison")
     args = parser.parse_args()
 
@@ -144,6 +175,9 @@ if __name__ == "__main__":
             for line in f:
                 if line.strip():
                     spans.append(json.loads(line))
-        plot_single_gantt(spans, args.title, args.out)
+        if any("lane" in s for s in spans):
+            plot_lane_gantt(spans, args.title, args.out, json.loads(args.legend) if args.legend else None)
+        else:
+            plot_single_gantt(spans, args.title, args.out)
     else:
         print("Usage: python3 plot_gantt.py (--jsonl <trace.jsonl> | --versions <versions.json>) --out <output.png> --title '<Title>'")
