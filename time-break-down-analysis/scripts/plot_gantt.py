@@ -13,6 +13,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib import font_manager
+
+# Pick a CJK-capable font so Chinese phase labels don't render as boxes.
+for _family in ("Noto Sans CJK TC", "Noto Sans CJK JP", "Noto Serif CJK TC", "WenQuanYi Zen Hei"):
+    if any(f.name == _family for f in font_manager.fontManager.ttflist):
+        plt.rcParams["font.sans-serif"] = [_family, "DejaVu Sans"]
+        plt.rcParams["axes.unicode_minus"] = False
+        break
 
 
 # Premium cohesive palette
@@ -45,9 +53,9 @@ def plot_single_gantt(spans: List[Dict[str, Any]], title: str, output_path: str)
     y_positions = list(range(len(spans)))
 
     for i, s in enumerate(spans):
-        start = s.get("rel_start", 0.0)
-        dur = s.get("duration_sec", (s.get("rel_end", 0.0) - start))
-        color = get_color(s.get("category", s["phase"]))
+        start = s.get("rel_start", s.get("start", 0.0))
+        dur = s.get("duration_sec", s.get("dur", s.get("rel_end", 0.0) - start))
+        color = get_color(s.get("category", s.get("cat", s["phase"])))
         
         ax.barh(i, dur, left=start, height=0.55, align='center', color=color,
                 edgecolor='black', linewidth=0.8, alpha=0.9)
@@ -124,9 +132,13 @@ if __name__ == "__main__":
     parser.add_argument("--jsonl", help="Input JSONL file of spans")
     parser.add_argument("--out", default="gantt.png", help="Output PNG path")
     parser.add_argument("--title", default="Time Breakdown Analysis", help="Chart title")
+    parser.add_argument("--versions", help="JSON file: [{name, spans:[{phase,start,dur,cat}]}] for a stacked comparison")
     args = parser.parse_args()
 
-    if args.jsonl and os.path.exists(args.jsonl):
+    if args.versions and os.path.exists(args.versions):
+        with open(args.versions, "r", encoding="utf-8") as f:
+            plot_multiversion_comparison(json.load(f), args.title, args.out)
+    elif args.jsonl and os.path.exists(args.jsonl):
         spans = []
         with open(args.jsonl, "r", encoding="utf-8") as f:
             for line in f:
@@ -134,4 +146,4 @@ if __name__ == "__main__":
                     spans.append(json.loads(line))
         plot_single_gantt(spans, args.title, args.out)
     else:
-        print("Usage: python3 plot_gantt.py --jsonl <trace.jsonl> --out <output.png> --title '<Title>'")
+        print("Usage: python3 plot_gantt.py (--jsonl <trace.jsonl> | --versions <versions.json>) --out <output.png> --title '<Title>'")

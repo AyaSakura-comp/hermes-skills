@@ -1,7 +1,7 @@
 ---
 name: time-break-down-analysis
-description: 通用時間拆解分析（Time Breakdown Analysis）與瓶頸根因最佳化方法論。當使用者要求分析系統效能、解構管線延遲、定位卡頓瓶頸、繪製多軌甘特圖（Gantt Chart）、進行 A/B/C/D 漸進式架構優化、或執行 /time-break-down-analysis 指令時使用。涵蓋自主 Agent、LLM 推論管線、瀏覽器自動化、RAG 搜尋與後端分散式系統之通用評估與協作優化框架。
-version: 1.0.0
+description: 時間拆解分析（Time Breakdown）與多軌甘特圖。只要使用者提到 time break down、time breakdown、timebreakdown、時間拆解、耗時拆解、時間分布、每一步花多久、哪一步最慢等任何「時間怎麼分」的字眼，就一定要用這個 skill，並且一定要用 scripts/plot_gantt.py 畫出甘特圖（X 軸時間、Y 軸動作）交付，不能只給文字表格。也用於分析系統效能、解構管線延遲、定位瓶頸、A/B/C/D 漸進式優化與 /time-break-down-analysis 指令；涵蓋 Agent、LLM 推論、瀏覽器／computer-use 自動化、RAG 與後端系統。
+version: 1.1.0
 author: Antigravity & User Pair-Programming Methodology
 license: MIT
 metadata:
@@ -20,6 +20,27 @@ metadata:
 > 2. **單一變數漸進式版本里程碑 (A/B/C/D Controlled Comparison)**
 > 3. **與 AI 協同的蘇格拉底式瓶頸發想協定 (Socratic Bottleneck Brainstorming)**
 > 4. **零偏差跨範式功能全驗證 (10/10 Edge-Case Parity Matrix)**
+
+---
+
+## ⚠️ 強制規則：提到 time break down 就一定要畫圖
+
+只要使用者的訊息提到 time break down／time breakdown／時間拆解／耗時拆解／每一步多久，回覆就**必須**包含一張用 `scripts/plot_gantt.py` 畫出的甘特圖 PNG。只給文字表格算沒做完。
+
+1. **先有真實時間戳**：每個步驟都要有 start 和 end（相對於任務開始的秒數）。資料只有開始時間時，先補上結束時間的記錄並重跑一次，不要用猜的。兩個工具呼叫之間的空檔要畫成獨立一條（例如「模型思考」），不能並進工具時間。
+2. **寫成 JSONL**，一行一個步驟：
+   ```json
+   {"phase": "3. click #13", "category": "submit", "rel_start": 9.05, "duration_sec": 1.83}
+   ```
+   `category` 決定顏色，用這些關鍵字：`open` 藍、`ground` 紫、`plan` 橘（模型思考／推論）、`fill` 綠、`settle` 紅（等待／sleep）、`submit` 青、`render` 金、`io` 深灰，其他是灰。`phase` 可以寫中文（腳本會自動選 Noto CJK 字型）。
+3. **畫圖**（輸出放 scratchpad 或該專案的 state 目錄）：
+   ```bash
+   python3 ~/.hermes/skills/time-break-down-analysis/scripts/plot_gantt.py \
+     --jsonl <trace.jsonl> --out <abs/path/gantt.png> --title "<任務> time breakdown (<總秒數>s)"
+   ```
+   比較多個版本時改用 `--versions <versions.json>`，格式是 `[{"name": "V1 (14.2s)", "spans": [{"phase", "start", "dur", "cat"}]}]`。
+4. **自己打開 PNG 看一遍**再交付，確認文字沒有變成方框、長條沒有疊在一起、步驟沒有漏掉。
+5. **交付**：先寫一句結論（最大的時間花在哪裡、占幾 %），附上依類別加總的小表，再附圖。在 Piweb／Discord 這類介面要用 `[[file: /absolute/path/gantt.png]]` 的格式附檔。
 
 ---
 
