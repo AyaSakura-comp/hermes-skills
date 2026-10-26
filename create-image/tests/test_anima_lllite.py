@@ -29,6 +29,7 @@ class AnimaLLLiteTests(unittest.TestCase):
             end_percent=0.5,
             loras=[('style.safetensors', 1.0)],
             trigger='anime, ',
+            negative_prompt='blurry, photorealistic, 3d render',
         )
 
         self.assertEqual(workflow['6']['class_type'], 'ModelPatchLoader')
@@ -42,6 +43,7 @@ class AnimaLLLiteTests(unittest.TestCase):
         self.assertEqual(workflow['8']['inputs']['end_percent'], 0.5)
         self.assertEqual(workflow['12']['inputs']['model'], ['8', 0])
         self.assertEqual(workflow['12']['inputs']['steps'], 30)
+        self.assertIn('blurry, photorealistic, 3d render', workflow['10']['inputs']['text'])
 
     def test_control_image_is_grayscale_and_matches_generation_canvas(self):
         mod = load_module()
@@ -66,6 +68,7 @@ class AnimaLLLiteTests(unittest.TestCase):
         self.assertEqual(args.end_percent, 0.5)
         self.assertEqual(args.aspect_ratio, '16:9')
         self.assertIsNone(args.output_size)
+        self.assertEqual(args.negative_prompt, '')
 
     def test_explicit_output_size_sets_exact_generation_canvas(self):
         mod = load_module()

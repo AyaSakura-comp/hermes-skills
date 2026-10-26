@@ -1,16 +1,16 @@
 ---
 name: show-diff
-description: Render git diff as a beautiful HTML5 page and host it on a local server for visual review
+description: Render git diff as a beautiful HTML5 page and return the generated HTML file directly for visual review.
 ---
 
 # Show Git Diff as HTML
 
-Convert raw `git diff` output into a styled HTML5 page and serve it via a local HTTP server.
+Convert raw `git diff` output into a styled standalone HTML5 page and return the generated file directly to the user.
 
 ## Prerequisites
 
 - Git repository in current directory
-- Python 3.x (for conversion script + HTTP server)
+- Python 3.x (for the conversion script)
 - No external dependencies needed
 
 ## Steps
@@ -25,13 +25,13 @@ Convert raw `git diff` output into a styled HTML5 page and serve it via a local 
    python3 /home/chihmin/.hermes/skills/devops/show-diff/scripts/diff2html.py /tmp/my-diff.patch
    ```
 
-2. **Start HTTP server**
-   ```bash
-   cd /tmp && python3 -m http.server 8899
-   ```
-
-3. **Open URL**
-   - Local: `http://aya.crayfish-monitor.ts.net:8899/git-diff.html`
+2. **Return the HTML file directly**
+   - The converter writes `/tmp/git-diff.html`.
+   - In the final response, attach it with the required outbox marker:
+     ```text
+     [[file: /tmp/git-diff.html]]
+     ```
+   - Do not start an HTTP server or return a hosted URL unless the user explicitly requests hosting.
 
 ## Notes
 
@@ -39,6 +39,7 @@ Convert raw `git diff` output into a styled HTML5 page and serve it via a local 
 - Syntax highlighting for additions (green) and deletions (red)
 - File sections are collapsible
 - Print-friendly layout included
+- Always attach the generated HTML file directly with `[[file: /tmp/git-diff.html]]`
 - Server runs on port 8899 (change if needed)
 
 ## Script Location

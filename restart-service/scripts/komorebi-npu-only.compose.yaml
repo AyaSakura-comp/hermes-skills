@@ -1,0 +1,5 @@
+# Overlay only; use the existing production image, never build working-tree code.
+services:
+  app:
+    environment:
+      KOMOREBI_DEFAULT_BACKEND: npu

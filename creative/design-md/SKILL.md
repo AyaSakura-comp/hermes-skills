@@ -1,196 +1,87 @@
 ---
 name: design-md
-description: Author, validate, diff, and export DESIGN.md files — Google's open-source format spec that gives coding agents a persistent, structured understanding of a design system (tokens + rationale in one file). Use when building a design system, porting style rules between projects, generating UI with consistent brand, or auditing accessibility/contrast.
-version: 1.0.0
+description: 定義與產生現代前端 UI/UX 設計系統規格書（DESIGN.md）。包含色票系統（HSL/HEX/語意色）、響應式佈局規格（Mobile 手機 390px、Tablet 平板、Desktop 桌面 1280px+）、間距網格、字體層級、深淺色主題與元件互動狀態。當需要規劃網站/App 視覺規範、UI Layout 或設計 Tokens 時使用。
+version: 2.0.0
 author: Hermes Agent
 license: MIT
 metadata:
   hermes:
-    tags: [design, design-system, tokens, ui, accessibility, wcag, tailwind, dtcg, google]
-    related_skills: [popular-web-designs, excalidraw, architecture-diagram]
+    tags: [ui, ux, design-system, design-tokens, responsive, mobile, desktop, layout, color-palette, typography, tailwind, dark-mode]
 ---
 
-# DESIGN.md Skill
+# UI/UX Design System & Layout Specification (`DESIGN.md`)
 
-DESIGN.md is Google's open spec (Apache-2.0, `google-labs-code/design.md`) for
-describing a visual identity to coding agents. One file combines:
+專門用於為前端 Web、Mobile Web 與桌面端應用制定**結構化、跨裝置的 UI/UX 設計規範（`DESIGN.md`）**。
 
-- **YAML front matter** — machine-readable design tokens (normative values)
-- **Markdown body** — human-readable rationale, organized into canonical sections
-
-Tokens give exact values. Prose tells agents *why* those values exist and how to
-apply them. The CLI (`npx @google/design.md`) lints structure + WCAG contrast,
-diffs versions for regressions, and exports to Tailwind or W3C DTCG JSON.
-
-## When to use this skill
-
-- User asks for a DESIGN.md file, design tokens, or a design system spec
-- User wants consistent UI/brand across multiple projects or tools
-- User pastes an existing DESIGN.md and asks to lint, diff, export, or extend it
-- User asks to port a style guide into a format agents can consume
-- User wants contrast / WCAG accessibility validation on their color palette
-
-For purely visual inspiration or layout examples, use `popular-web-designs`
-instead. This skill is for the *formal spec file* itself.
-
-## File anatomy
-
-```md
 ---
-version: alpha
-name: Heritage
-description: Architectural minimalism meets journalistic gravitas.
+
+## 📐 一、標準 DESIGN.md 模板結構
+
+```markdown
+---
+version: 1.0.0
+name: "Modern Minimalist System"
+description: "跨裝置深淺色自適應設計系統"
+
+# 1. 色票系統 (Color Palette Tokens)
 colors:
-  primary: "#1A1C1E"
-  secondary: "#6C7278"
-  tertiary: "#B8422E"
-  neutral: "#F7F5F2"
-typography:
-  h1:
-    fontFamily: Public Sans
-    fontSize: 3rem
-    fontWeight: 700
-    lineHeight: 1.1
-    letterSpacing: "-0.02em"
-  body-md:
-    fontFamily: Public Sans
-    fontSize: 1rem
-rounded:
-  sm: 4px
-  md: 8px
-  lg: 16px
+  primary: { light: "#0F172A", dark: "#F8FAFC" }
+  brand: { default: "#3B82F6", hover: "#2563EB", active: "#1D4ED8" }
+  background: { light: "#FFFFFF", dark: "#0B0F19", subtle: "#F1F5F9" }
+  surface: { light: "#F8FAFC", dark: "#111827", elevated: "#1E293B" }
+  text: { primary: "#0F172A", secondary: "#64748B", muted: "#94A3B8" }
+  semantic:
+    success: "#10B981"
+    warning: "#F59E0B"
+    error: "#EF4444"
+    info: "#06B6D4"
+
+# 2. 跨裝置響應式斷點與佈局 (Responsive Layouts)
+breakpoints:
+  mobile: "390px"    # iPhone / 窄螢幕直向 (單欄流式佈局、底欄導航、安全區適配)
+  tablet: "768px"    # 平板 / 摺疊螢幕 (2 欄網格、可折疊側邊欄)
+  desktop: "1280px"  # 標準桌面 (12 欄 Grid、固定雙欄側導航、Max-W 1200px)
+  wide: "1536px"     # 超寬螢幕 (Max-W 1440px 居中置中)
+
+# 3. 間距與圓角尺度 (Spacing & Radii)
 spacing:
-  sm: 8px
-  md: 16px
-  lg: 24px
-components:
-  button-primary:
-    backgroundColor: "{colors.tertiary}"
-    textColor: "#FFFFFF"
-    rounded: "{rounded.sm}"
-    padding: 12px
-  button-primary-hover:
-    backgroundColor: "{colors.primary}"
+  xs: "4px"
+  sm: "8px"
+  md: "16px"
+  lg: "24px"
+  xl: "32px"
+  2xl: "48px"
+radii:
+  sm: "6px"
+  md: "10px"
+  lg: "16px"
+  full: "9999px"
+
+# 4. 字體排印 (Typography Hierarchy)
+typography:
+  fontFamily: "Inter, 'Noto Sans TC', system-ui, sans-serif"
+  h1: { mobile: "24px / 1.2", desktop: "36px / 1.15", weight: 700 }
+  h2: { mobile: "20px / 1.25", desktop: "28px / 1.2", weight: 600 }
+  body: { size: "15px", lineHeight: "1.6", weight: 400 }
+  caption: { size: "12px", lineHeight: "1.4", weight: 500 }
 ---
 
-## Overview
+# UI/UX Design System Specification
 
-Architectural Minimalism meets Journalistic Gravitas...
+## 📱 1. 跨裝置佈局原則 (Responsive Strategy)
+* **Mobile First (手機端 390px)**：
+  * 單欄垂直佈局，操作熱區集中於拇指易觸及的底部 1/3。
+  * 點擊目標（Touch Target）高度不小於 44px。
+* **Desktop (桌面端 1280px+)**：
+  * 左側固定側邊欄導航（寬 240px~280px），右側為 12 欄彈性內容區域。
+  * 支援懸停微動效（Hover Micro-interactions）與鍵盤快捷鍵。
 
-## Colors
+## 🎨 2. 視覺與層次 (Visual Elevation & Effects)
+* **毛玻璃 (Glassmorphism)**：`backdrop-blur-md bg-white/70 dark:bg-slate-900/70 border border-white/20`.
+* **陰影層次 (Shadows)**：
+  * `elevation-1` (卡片): `0 1px 3px rgba(0,0,0,0.05)`
+  * `elevation-2` (彈窗/選單): `0 10px 25px -5px rgba(0,0,0,0.1)`
 
-- **Primary (#1A1C1E):** Deep ink for headlines and core text.
-- **Tertiary (#B8422E):** "Boston Clay" — the sole driver for interaction.
-
-## Typography
-
-Public Sans for everything except small all-caps labels...
-
-## Components
-
-`button-primary` is the only high-emphasis action on a page...
-```
-
-## Token types
-
-| Type | Format | Example |
-|------|--------|---------|
-| Color | `#` + hex (sRGB) | `"#1A1C1E"` |
-| Dimension | number + unit (`px`, `em`, `rem`) | `48px`, `-0.02em` |
-| Token reference | `{path.to.token}` | `{colors.primary}` |
-| Typography | object with `fontFamily`, `fontSize`, `fontWeight`, `lineHeight`, `letterSpacing`, `fontFeature`, `fontVariation` | see above |
-
-Component property whitelist: `backgroundColor`, `textColor`, `typography`,
-`rounded`, `padding`, `size`, `height`, `width`. Variants (hover, active,
-pressed) are **separate component entries** with related key names
-(`button-primary-hover`), not nested.
-
-## Canonical section order
-
-Sections are optional, but present ones MUST appear in this order. Duplicate
-headings reject the file.
-
-1. Overview (alias: Brand & Style)
-2. Colors
-3. Typography
-4. Layout (alias: Layout & Spacing)
-5. Elevation & Depth (alias: Elevation)
-6. Shapes
-7. Components
-8. Do's and Don'ts
-
-Unknown sections are preserved, not errored. Unknown token names are accepted
-if the value type is valid. Unknown component properties produce a warning.
-
-## Workflow: authoring a new DESIGN.md
-
-1. **Ask the user** (or infer) the brand tone, accent color, and typography
-   direction. If they provided a site, image, or vibe, translate it to the
-   token shape above.
-2. **Write `DESIGN.md`** in their project root using `write_file`. Always
-   include `name:` and `colors:`; other sections optional but encouraged.
-3. **Use token references** (`{colors.primary}`) in the `components:` section
-   instead of re-typing hex values. Keeps the palette single-source.
-4. **Lint it** (see below). Fix any broken references or WCAG failures
-   before returning.
-5. **If the user has an existing project**, also write Tailwind or DTCG
-   exports next to the file (`tailwind.theme.json`, `tokens.json`).
-
-## Workflow: lint / diff / export
-
-The CLI is `@google/design.md` (Node). Use `npx` — no global install needed.
-
-```bash
-# Validate structure + token references + WCAG contrast
-npx -y @google/design.md lint DESIGN.md
-
-# Compare two versions, fail on regression (exit 1 = regression)
-npx -y @google/design.md diff DESIGN.md DESIGN-v2.md
-
-# Export to Tailwind theme JSON
-npx -y @google/design.md export --format tailwind DESIGN.md > tailwind.theme.json
-
-# Export to W3C DTCG (Design Tokens Format Module) JSON
-npx -y @google/design.md export --format dtcg DESIGN.md > tokens.json
-
-# Print the spec itself — useful when injecting into an agent prompt
-npx -y @google/design.md spec --rules-only --format json
-```
-
-All commands accept `-` for stdin. `lint` returns exit 1 on errors. Use the
-`--format json` flag and parse the output if you need to report findings
-structurally.
-
-### Lint rule reference (what the 7 rules catch)
-
-- `broken-ref` (error) — `{colors.missing}` points at a non-existent token
-- `duplicate-section` (error) — same `## Heading` appears twice
-- `invalid-color`, `invalid-dimension`, `invalid-typography` (error)
-- `wcag-contrast` (warning/info) — component `textColor` vs `backgroundColor`
-  ratio against WCAG AA (4.5:1) and AAA (7:1)
-- `unknown-component-property` (warning) — outside the whitelist above
-
-When the user cares about accessibility, call this out explicitly in your
-summary — WCAG findings are the most load-bearing reason to use the CLI.
-
-## Pitfalls
-
-- **Don't nest component variants.** `button-primary.hover` is wrong;
-  `button-primary-hover` as a sibling key is right.
-- **Hex colors must be quoted strings.** YAML will otherwise choke on `#` or
-  truncate values like `#1A1C1E` oddly.
-- **Negative dimensions need quotes too.** `letterSpacing: -0.02em` parses as
-  a YAML flow — write `letterSpacing: "-0.02em"`.
-- **Section order is enforced.** If the user gives you prose in a random order,
-  reorder it to match the canonical list before saving.
-- **`version: alpha` is the current spec version** (as of Apr 2026). The spec
-  is marked alpha — watch for breaking changes.
-- **Token references resolve by dotted path.** `{colors.primary}` works;
-  `{primary}` does not.
-
-## Spec source of truth
-
-- Repo: https://github.com/google-labs-code/design.md (Apache-2.0)
-- CLI: `@google/design.md` on npm
-- License of generated DESIGN.md files: whatever the user's project uses;
-  the spec itself is Apache-2.0.
+## ♿ 3. 無障礙與對比度 (Accessibility)
+* 文字與背景對比度嚴格遵循 WCAG AA 規範（文字對比度 ≥ 4.5:1，標題 ≥ 3:1）。
+* 所有互動按鈕均具備 `:focus-visible` 外框焦點環。

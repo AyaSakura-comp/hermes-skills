@@ -35,6 +35,8 @@ def parse_args(argv=None):
     parser.add_argument("--steps", type=int, default=anima.ANIME_STEPS)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--guidance-scale", type=float, default=anima.ANIME_CFG)
+    parser.add_argument("--negative-prompt", default="",
+                        help="Sequence-locked style exclusions appended to anatomy negatives")
     parser.add_argument("--native-1080p", action="store_true")
     parser.add_argument("--model-patch", default=DEFAULT_MODEL_PATCH)
     parser.add_argument("--out-dir", default="/home/chihmin/models-work/flux2/output/create-image")
@@ -69,8 +71,11 @@ def build_lllite_workflow(prompt: str, image_name: str, gen_w: int, gen_h: int,
                            seed: int, steps: int, strength: float, end_percent: float,
                            loras: list, trigger: str,
                            model_patch: str = DEFAULT_MODEL_PATCH,
-                           cfg: float = anima.ANIME_CFG) -> dict:
+                           cfg: float = anima.ANIME_CFG,
+                           negative_prompt: str = "") -> dict:
     lora_nodes, model_ref, clip_ref = anima._lora_chain(loras)
+    anatomy_negative = "extra arms, extra legs, duplicate person, malformed hands, deformed anatomy"
+    combined_negative = f"{anatomy_negative}, {negative_prompt}" if negative_prompt else anatomy_negative
     workflow = {
         "1": {"class_type": "UNETLoader", "inputs": {
             "unet_name": anima.ANIMA_UNET, "weight_dtype": "default"}},
@@ -91,7 +96,7 @@ def build_lllite_workflow(prompt: str, image_name: str, gen_w: int, gen_h: int,
             "clip": clip_ref, "text": trigger + prompt}},
         "10": {"class_type": "CLIPTextEncode", "inputs": {
             "clip": clip_ref,
-            "text": "extra arms, extra legs, duplicate person, malformed hands, deformed anatomy",
+            "text": combined_negative,
         }},
         "11": {"class_type": "EmptySD3LatentImage", "inputs": {
             "width": gen_w, "height": gen_h, "batch_size": 1}},
@@ -178,6 +183,7 @@ def run(args) -> int:
             args.prompt, image_name, gen_w, gen_h, seed, args.steps,
             args.strength, args.end_percent, loras, trigger,
             model_patch=args.model_patch, cfg=args.guidance_scale,
+            negative_prompt=args.negative_prompt,
         )
         prompt_id = anima._post(
             "/prompt", {"prompt": workflow, "client_id": str(uuid.uuid4())}
@@ -203,6 +209,7 @@ def run(args) -> int:
             "model_patch": args.model_patch,
             "reference": str(reference),
             "prompt": args.prompt,
+            "negative_prompt": args.negative_prompt,
             "seed": seed,
             "steps": args.steps,
             "strength": args.strength,

@@ -31,11 +31,17 @@ class WarmFlux2Service:
         os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
         os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
         t = time.perf_counter()
-        self.pipe = Flux2KleinPipeline.from_pretrained(ci.MODEL_ID_9B_KV, torch_dtype=torch.bfloat16)
-        ci.sync(); self.timings["load_pipeline_seconds"] = time.perf_counter() - t
-        t = time.perf_counter()
-        self.pipe = self.pipe.to("cuda")
-        ci.sync(); self.timings["move_to_gpu_seconds"] = time.perf_counter() - t
+        try:
+            self.pipe = Flux2KleinPipeline.from_pretrained(ci.MODEL_ID_9B_KV, torch_dtype=torch.bfloat16, device_map="cuda")
+            ci.sync(); self.timings["load_pipeline_seconds"] = time.perf_counter() - t
+            self.timings["move_to_gpu_seconds"] = 0.0
+        except Exception as exc:
+            print(f"[create-image-daemon] direct device load failed ({exc}); falling back to standard load", flush=True)
+            self.pipe = Flux2KleinPipeline.from_pretrained(ci.MODEL_ID_9B_KV, torch_dtype=torch.bfloat16)
+            ci.sync(); self.timings["load_pipeline_seconds"] = time.perf_counter() - t
+            t = time.perf_counter()
+            self.pipe = self.pipe.to("cuda")
+            ci.sync(); self.timings["move_to_gpu_seconds"] = time.perf_counter() - t
         self.loaded_at = datetime.now().isoformat()
 
     def maybe_load_lora(self, prompt: str, no_auto_lora: bool, lora_scale: float) -> dict:

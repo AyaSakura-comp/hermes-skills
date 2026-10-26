@@ -11,6 +11,7 @@ setup_fake_h3() {
   local tmp="$1" fake="$tmp/ComfyUI"
   mkdir -p "$fake/.venv/bin" "$fake/scripts" "$fake/output/video"
   : > "$fake/scripts/minimax_h3_generate.py"
+  : > "$fake/scripts/minimax_h3_ref_generate.py"
   cat >"$fake/.venv/bin/python" <<'PY'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE_MINIMAX_ARGS"
@@ -70,6 +71,33 @@ test_missing_image_fails_before_generation() {
   [[ ! -e "$tmp/args.txt" ]] || fail "generator ran despite missing image"
 }
 
+test_mv_routes_storyboard_and_audio_to_r2v() {
+  local tmp image audio output args
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+  setup_fake_h3 "$tmp"; image="$tmp/board.png"; audio="$tmp/song.mp3"; output="$tmp/out.mp4"; args="$tmp/args.txt"
+  : >"$image"; : >"$audio"
+  run_fake_h3 "$tmp" --mv -p "Use <Picture 1> and <Audio 1>" \
+    --reference-image "$image" --reference-audio "$audio" -o "$output" >"$tmp/log.txt"
+  assert_contains "$args" "minimax_h3_ref_generate.py"
+  assert_contains "$args" "--reference-image"
+  assert_contains "$args" "$image"
+  assert_contains "$args" "--reference-audio"
+  assert_contains "$args" "$audio"
+  assert_contains "$args" "--steps"
+  assert_contains "$args" "20"
+}
+
+test_mv_requires_both_reference_inputs() {
+  local tmp image log
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+  setup_fake_h3 "$tmp"; image="$tmp/board.png"; log="$tmp/log.txt"; : >"$image"
+  if run_fake_h3 "$tmp" --mv -p "MV" --reference-image "$image" -o "$tmp/out.mp4" >"$log" 2>&1; then
+    fail "MV without reference audio should fail"
+  fi
+  assert_contains "$log" "MV requires --reference-image and --reference-audio"
+  [[ ! -e "$tmp/args.txt" ]] || fail "generator ran despite incomplete MV references"
+}
+
 test_reference_sampler_defaults_to_20_steps() {
   local tmp args
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
@@ -119,6 +147,8 @@ test_help_mentions_minimax_backend() {
 test_default_is_minimax_h3
 test_image_is_forwarded
 test_missing_image_fails_before_generation
+test_mv_routes_storyboard_and_audio_to_r2v
+test_mv_requires_both_reference_inputs
 test_reference_sampler_defaults_to_20_steps
 test_no_audio_strips_audio_stream
 test_other_backends_are_rejected

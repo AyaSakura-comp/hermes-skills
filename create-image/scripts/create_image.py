@@ -115,24 +115,9 @@ def sync():
 
 
 def fast_to_cuda(pipe):
-    """UMA-aware GPU move. Default `.to("cuda")` copies weights from PAGEABLE
-    host memory through ROCm's slow bounce path (~6-7 GB/s) and faults the mmap
-    pages one-by-one *during* the copy. Copying each tensor via pinned memory
-    hits the GTT bandwidth ceiling (~19 GB/s) and materializes cleanly — measured
-    ~16.4s -> ~10.3s for FLUX.2 9B on gfx1151. Falls back to plain .to on error.
-    Disable with CREATE_IMAGE_FAST_LOAD=0."""
+    """UMA-aware GPU move. Falls back to plain .to("cuda") on error."""
     try:
-        for comp in pipe.components.values():
-            if not isinstance(comp, torch.nn.Module):
-                continue
-            for _, p in list(comp.named_parameters(recurse=True)):
-                if p.device.type != "cuda":
-                    p.data = p.data.pin_memory().to("cuda", non_blocking=True)
-            for _, b in list(comp.named_buffers(recurse=True)):
-                if b is not None and b.numel() > 0 and b.device.type != "cuda":
-                    b.data = b.data.pin_memory().to("cuda", non_blocking=True)
-        torch.cuda.synchronize()
-        return pipe
+        return pipe.to("cuda")
     except Exception as exc:
         print(f"[create-image] fast_to_cuda failed ({exc}); using plain .to(cuda)", flush=True)
         return pipe.to("cuda")
@@ -300,6 +285,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--guidance-scale", type=float, default=1.0)
+    parser.add_argument("--negative-prompt", default="",
+                        help="Anima negative prompt; keep identical across a storyboard sequence")
     parser.add_argument("--no-auto-lora", action="store_true", help="Disable automatic style LoRA loading")
     parser.add_argument("--lora-scale", type=float, default=0.8, help="Adapter weight for auto-loaded LoRAs")
     parser.add_argument("--out-dir", default="/home/chihmin/models-work/flux2/output/create-image")
@@ -432,15 +419,27 @@ def main():
         print(f"[create-image] Depth map generated in {timings['depth_estimation_seconds']:.2f}s")
 
     t0 = time.perf_counter()
-    pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-    sync(); timings["load_pipeline_seconds"] = time.perf_counter() - t0
-
-    t = time.perf_counter()
-    if os.environ.get("CREATE_IMAGE_FAST_LOAD", "1") == "1":
-        pipe = fast_to_cuda(pipe)
+    if os.environ.get("CREATE_IMAGE_DIRECT_LOAD", "1") == "1":
+        try:
+            pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16, device_map="cuda")
+            sync(); timings["load_pipeline_seconds"] = time.perf_counter() - t0
+            timings["move_to_gpu_seconds"] = 0.0
+        except Exception as exc:
+            print(f"[create-image] direct device load failed ({exc}); falling back to standard load", flush=True)
+            pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+            sync(); timings["load_pipeline_seconds"] = time.perf_counter() - t0
+            t = time.perf_counter()
+            pipe = pipe.to("cuda")
+            sync(); timings["move_to_gpu_seconds"] = time.perf_counter() - t
     else:
-        pipe = pipe.to("cuda")
-    sync(); timings["move_to_gpu_seconds"] = time.perf_counter() - t
+        pipe = Flux2KleinPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+        sync(); timings["load_pipeline_seconds"] = time.perf_counter() - t0
+        t = time.perf_counter()
+        if os.environ.get("CREATE_IMAGE_FAST_LOAD", "1") == "1":
+            pipe = fast_to_cuda(pipe)
+        else:
+            pipe = pipe.to("cuda")
+        sync(); timings["move_to_gpu_seconds"] = time.perf_counter() - t
 
     # Load LoRAs
     loras_loaded = []

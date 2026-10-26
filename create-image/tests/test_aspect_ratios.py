@@ -24,6 +24,17 @@ class AspectRatioTests(unittest.TestCase):
             (768, 1152, 1184, 1776, '2:3'),
         )
 
+    def test_anima_workflow_uses_locked_negative_style_prompt(self):
+        mod = load_module(ANIMA_SCRIPT, 'anima_negative')
+        workflow = mod._build_workflow(
+            'locked style, moonlit stage', 864, 480, 42, 30, 4.5, [], '',
+            negative_prompt='blurry, photorealistic, 3d render',
+        )
+        self.assertEqual(
+            workflow['6']['inputs']['text'],
+            'blurry, photorealistic, 3d render',
+        )
+
     def test_anime_can_select_3x2_upscaled_landscape(self):
         mod = load_module(ANIMA_SCRIPT, 'anima')
         self.assertEqual(

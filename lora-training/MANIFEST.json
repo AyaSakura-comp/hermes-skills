@@ -1,0 +1,65 @@
+{
+  "name": "lora-training",
+  "version": 1,
+  "record_started_at": "2026-09-17 20:33:54 +0800 CST",
+  "kind": "Documentation-only skill; no executable training launcher",
+  "pi_loader_validation": "one skill discovered; zero diagnostics",
+  "source_history": "/home/chihmin/qwen-date-audit/LORA-TRAINING-END-TO-END-RECORD.zh-TW.md",
+  "records": [
+    {
+      "path": "SKILL.md",
+      "bytes": 7406,
+      "sha256": "17c4e081e3e929b4e30d460a9234b567b0469e1d34c40a678f5fbaac3244ae7a"
+    },
+    {
+      "path": "assets/RUN-RECORD.template.md",
+      "bytes": 3694,
+      "sha256": "f8cf44c70507452d15e00cd484a5c4dd6b895edbe1fedcd15bf3761d0cdfea06"
+    },
+    {
+      "path": "assets/gguf-qlora-all-ops.png",
+      "bytes": 505259,
+      "sha256": "d77c4b67f34652b749e664b32438a0a36a82f07a73a8d5dbf8276874cb8e5dd6"
+    },
+    {
+      "path": "assets/qlora-simple.png",
+      "bytes": 95282,
+      "sha256": "bd9f785abbde0bfea7e75310fa75a6e60a0695630003c072b44055525a29523b"
+    },
+    {
+      "path": "references/data-and-evaluation.md",
+      "bytes": 4213,
+      "sha256": "8420519a27de80b98ecf133a8a1191f27143a283a40209aec839cfd9ce893412"
+    },
+    {
+      "path": "references/deployment-and-cache.md",
+      "bytes": 4443,
+      "sha256": "935e219c1a8b73d56cf183937ebfe1513d10cafc6e9dc28343a6cef898e73147"
+    },
+    {
+      "path": "references/gguf-rocm-recipe.md",
+      "bytes": 5817,
+      "sha256": "277c7348432141345c56ffac7a1168141843c2d1528cb417d1043a070f427b59"
+    },
+    {
+      "path": "references/qwen-v11-evidence.json",
+      "bytes": 5461,
+      "sha256": "cdf3906c071fdeb46c2f46c89afc6056c3d678624c18f8470b50690dd196e6cf"
+    },
+    {
+      "path": "references/qwen-v11-history.zh-TW.md",
+      "bytes": 28626,
+      "sha256": "e481898a3c53b3ed24a455bc8118c0981be20e1cd878c6ade13db8113cd5c699"
+    },
+    {
+      "path": "references/troubleshooting.md",
+      "bytes": 3905,
+      "sha256": "a6a487c6c7c14f066e3409bea4536a40fea8aad2755a7466d01835d091e03172"
+    },
+    {
+      "path": "references/workflow.md",
+      "bytes": 4871,
+      "sha256": "365f41ae792d88ac7c736a22fcd0549394babdb1ce90720d218c93b371c553c6"
+    }
+  ]
+}

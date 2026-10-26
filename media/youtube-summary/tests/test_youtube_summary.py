@@ -38,6 +38,7 @@ class WhisperBackendTests(unittest.TestCase):
         self.assertEqual(environment["HSA_OVERRIDE_GFX_VERSION"], "11.5.1")
         self.assertEqual(environment["PYTORCH_HIP_ALLOC_CONF"], "expandable_segments:True")
         self.assertEqual(environment["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"], "1")
+        self.assertEqual(environment["MIOPEN_FIND_MODE"], "FAST")
 
     def test_normalize_segments_discards_empty_text_and_repairs_reversed_timestamps(self):
         segments = youtube_summary.normalize_whisper_segments([
@@ -62,6 +63,21 @@ class ParseArgsTests(unittest.TestCase):
 
         self.assertEqual(options.asr, "breeze")
         self.assertEqual(options.url, "https://youtu.be/example")
+
+    def test_supports_multiple_urls_and_workers(self):
+        options = youtube_summary.parse_args([
+            "-w", "4",
+            "https://youtu.be/vid1",
+            "https://youtu.be/vid2",
+            "https://youtu.be/vid3"
+        ])
+
+        self.assertEqual(options.workers, 4)
+        self.assertEqual(options.urls, [
+            "https://youtu.be/vid1",
+            "https://youtu.be/vid2",
+            "https://youtu.be/vid3"
+        ])
 
 
 if __name__ == "__main__":

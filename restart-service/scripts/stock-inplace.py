@@ -1,0 +1,601 @@
+#!/usr/bin/env python3
+"""Explicit in-place HayAegis deployment; never builds or recreates images."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import subprocess
+import time
+
+SERVICES = ('api', 'scheduler', 'agent', 'web')
+ROOT = Path('/home/chihmin/HayAegis/HayAegis')
+
+def run(args, **kw):
+    return subprocess.run(args, check=True, **kw)
+
+def output(args):
+    return subprocess.check_output(args)
+
+def save(path, data):
+    path.write_text(json.dumps(data, indent=2)); path.chmod(0o600)
+
+def validate(base):
+    base = base.resolve()
+    allowed = Path('/home/chihmin/.local/state/hayaegis-inplace').resolve()
+    if not base.is_relative_to(allowed) or base.stat().st_uid != os.getuid():
+        raise ValueError('Deployment bundle must be owner-controlled and inside the in-place state directory')
+    if base.stat().st_mode & 0o077:
+        raise ValueError('Deployment directory must be private')
+    return base
+
+def load_service_scope(base):
+    path=base/'service-scope.json'
+    if not path.exists():return ('api','scheduler','agent','web')
+    values=json.loads(path.read_text())
+    if values not in [['api','scheduler'], ['api','scheduler','web'], ['web']]:
+        raise ValueError('Only explicitly bounded history API/scheduler[/Web] or Web-only scopes are supported')
+    return tuple(values)
+
+def inspect(base):
+    ids = output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis']).decode().split()
+    all_items = json.loads(output(['docker','inspect',*ids]))
+    selected = {i['Config']['Labels']['com.docker.compose.service']:i for i in all_items}
+    if not all(s in selected for s in SERVICES): raise RuntimeError('Missing target container')
+    save(base/'before.json', {'services':selected,'all_container_ids':sorted(ids)})
+    for s in SERVICES:
+        i=selected[s]; print(s, i['Id'][:12], i['Image'][:19])
+    api=selected['api']['Id']
+    print('Runtime Python:',output(['docker','exec',api,'/app/.venv/bin/python','--version']).decode().strip())
+    for service, paths in [('api',['pyproject.toml','uv.lock']),('agent',['package.json','package-lock.json'])]:
+        dst=base/'original-metadata'/service;dst.mkdir(parents=True,exist_ok=True)
+        for p in paths: run(['docker','cp',selected[service]['Id']+':/app/'+p,str(dst/p)])
+    print('Read-only inspection complete; protected Compose metadata remains private.')
+
+def build(base):
+    before=json.loads((base/'before.json').read_text())['services']
+    out=base/'build';out.mkdir(exist_ok=True)
+    stamp=(base/'stamp').read_text().strip()
+    script=r'''set -euo pipefail
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends binutils >/dev/null
+for p in src cli scripts strategy-runner assets; do rm -rf "/app/$p"; cp -a "/input/$p" "/app/$p"; done
+cp /input/main_api.py /input/pyproject.toml /input/uv.lock /input/README.md /app/
+cd /app
+export UV_NO_DEV=0
+uv sync --frozen --group dev
+uv run --no-sync pyinstaller --onefile --name hayaegis --exclude-module fastapi --exclude-module uvicorn --exclude-module pytest --collect-submodules cli cli/__main__.py >/out/freeze.log 2>&1
+./dist/hayaegis --version
+mkdir -p /tmp/cli-smoke
+./dist/hayaegis --data-dir /tmp/cli-smoke --help >/out/cli-help.txt
+cp dist/hayaegis /out/hayaegis
+uv sync --frozen --no-dev
+chown -R 1000:1000 /app/.venv
+# Preserve editable /app import paths, not builder-only paths.
+tar -C /app -cpf /out/python-venv.tar .venv
+chown -R 1000:1000 /out
+'''
+    name='hayaegis-inplace-cli-build'
+    log=(base/'build.log').open('wb')
+    try:
+        run(['docker','run','--rm','--name',name,'--user','0','--cpus','4','--memory','8g','-v',str(base/'payload/app')+':/input:ro','-v',str(out)+':/out',before['api']['Image'],'bash','-c',script],stdout=log,stderr=subprocess.STDOUT,timeout=900)
+    finally:
+        log.close()
+    for p in [out/'hayaegis',out/'python-venv.tar']:
+        if not p.exists() or not p.stat().st_size:raise RuntimeError('Missing compiled artifact')
+    current=(base/'payload/agent/package-lock.json').read_bytes()
+    old=(base/'original-metadata/agent/package-lock.json').read_bytes()
+    if current != old or (base/'payload/agent/package.json').read_bytes() != (base/'original-metadata/agent/package.json').read_bytes():
+        agent_script='set -eu; mkdir /build; cp /input/package*.json /build/; cd /build; npm ci --omit=dev; tar -C /build -cpf /out/agent-node-modules.tar node_modules; chown 1000:1000 /out/agent-node-modules.tar'
+        with (base/'node-build.log').open('wb') as log:
+            run(['docker','run','--rm','--name','hayaegis-inplace-node-build','--user','0','--cpus','2','--memory','2g','-v',str(base/'payload/agent')+':/input:ro','-v',str(out)+':/out',before['agent']['Image'],'sh','-c',agent_script],stdout=log,stderr=subprocess.STDOUT,timeout=600)
+    else:
+        # Dependencies are unchanged; preserve the exact verified active runtime
+        # so sandbox/activation still receive their mandatory immutable artifact.
+        with (out/'agent-node-modules.tar').open('wb') as archive:
+            run(['docker','exec','--user','0',before['agent']['Id'],'tar','-C','/app','-cpf','-','node_modules'],stdout=archive)
+        (out/'agent-node-modules.tar').chmod(0o600)
+    print('Application artifacts built using existing images; no docker build/commit performed.')
+    save(base/'build-ready.json',{'stamp':stamp,'cli_sha256':hashlib.sha256((out/'hayaegis').read_bytes()).hexdigest()})
+
+def backup(base):
+    before=json.loads((base/'before.json').read_text())['services']
+    d=base/'rollback';d.mkdir(exist_ok=True)
+    members={'api':['app/src','app/cli','app/scripts','app/main_api.py','app/pyproject.toml','app/uv.lock','app/.venv','usr/local/bin/hayaegis'],
+             'scheduler':['app/src','app/cli','app/scripts','app/main_api.py','app/pyproject.toml','app/uv.lock','app/.venv','usr/local/bin/hayaegis'],
+             'agent':['app/src','app/skills','app/package.json','app/package-lock.json','app/node_modules'],
+             'web':['usr/share/nginx/html']}
+    for s, paths in members.items():
+        if s not in SERVICES:continue
+        paths=[p for p in paths if subprocess.run(['docker','exec',before[s]['Id'],'test','-e','/'+p],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0]
+        save(d/(s+'-members.json'),paths)
+        user = before[s]['Config'].get('User') or '0'
+        with (d/(s+'.tar')).open('wb') as f:run(['docker','exec','--user',user,before[s]['Id'],'tar','-C','/','-cpf','-',*paths],stdout=f)
+        (d/(s+'.tar')).chmod(0o600)
+    for s in ['api','scheduler']:
+        if s in SERVICES: run(['docker','cp',before[s]['Id']+':/usr/local/bin/uv',str(d/(s+'-uv-original'))])
+    if 'agent' in SERVICES:
+        run(['docker','cp',before['agent']['Id']+':/usr/local/bin/docker-entrypoint.sh',str(d/'agent-entrypoint-original')])
+    if SERVICES == ('web',):
+        save(base/'backup-ready.json',{'application_services':['web'],'web_rollback_archive':'rollback/web.tar','production_data_untouched':True})
+        print('Private Web rollback archive prepared; production data was not accessed.')
+        return
+    password=base/'backup-passphrase';password.write_text(secrets.token_urlsafe(48));password.chmod(0o600)
+    env=base/'api-environment';env.write_text('\n'.join(before['api']['Config']['Env'])+'\n');env.chmod(0o600)
+    entry=base/'create-backup.py'
+    entry.write_text("from pathlib import Path\nfrom src.backup_schedule import FilePassphraseProvider\nfrom src.backup_service import BackupProfile\nfrom src.portable_backup_service import PortableBackupService\nfrom src.config import settings\nwith FilePassphraseProvider(Path('/out/backup-passphrase')).provide() as password:\n    result=PortableBackupService(Path('/app/data'),staging_root=Path('/out/backup-staging')).create(Path('/out/pre-deploy.asbackup'),bytes(password),profile=BackupProfile.DAILY_DATA,release='pre-inplace',include_portable_credentials=True,secret_source=settings)\nprint('Verified encrypted backup; databases:',result.database_count)\n")
+    entry.chmod(0o600)
+    # Account data only (users + credentials). Market databases are bulk
+    # reference data restored from their source, and backing them up made
+    # every deploy wait 30+ minutes on a 13GB copy.
+    # All source DB connections use SQLite mode=ro. A writable mount is needed
+    # for WAL shared-memory coordination when a live WAL has no shm file.
+    script='cd /app; .venv/bin/python /out/create-backup.py'
+    with (base/'data-backup.log').open('wb') as log:
+        run(['docker','run','--rm','--name','hayaegis-inplace-data-backup','--user',str(os.getuid()),'--env-file',str(env),'--memory','2g','-v',str(base/'payload/app/src')+':/app/src:ro','-v',str(base/'payload/app/scripts')+':/app/scripts:ro','-v',str(ROOT/'data')+':/app/data','-v',str(ROOT/'backups')+':/app/backups','-v',str(base)+':/out',before['api']['Image'],'bash','-c',script],stdout=log,stderr=subprocess.STDOUT,timeout=3600)
+    if not (base/'pre-deploy.asbackup').exists():raise RuntimeError('Missing data backup')
+    save(base/'backup-ready.json',{'application_services':list(SERVICES),'data_backup':'pre-deploy.asbackup'})
+    print('Private application rollback archives and encrypted data backup prepared.')
+
+def check_identity(before):
+    for s in SERVICES:
+        now=json.loads(output(['docker','inspect',before[s]['Id']]))[0]
+        if now['Id'] != before[s]['Id'] or now['Image'] != before[s]['Image'] or sorted(now['Mounts'],key=lambda m:m['Destination']) != sorted(before[s]['Mounts'],key=lambda m:m['Destination']):
+            raise RuntimeError('Container/image/mount invariant changed: '+s)
+
+def ready(before):
+    api=before['api']['Id']
+    cmd=['docker','exec',api,'/app/.venv/bin/python','-c',"import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=5); assert r.status==200"]
+    last=None
+    for _ in range(60):
+        r=subprocess.run(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if r.returncode==0:break
+        last=r.returncode;time.sleep(2)
+    else:raise RuntimeError('API readiness failed')
+    # Compose starts Web after API becomes healthy, but nginx can briefly return
+    # 403 while its in-place document root is being restored. Wait for the
+    # public entrypoint instead of treating that startup window as a rollback.
+    for _ in range(60):
+        r=subprocess.run(['curl','--fail','--silent','--show-error','--max-time','5','http://127.0.0.1/'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if r.returncode==0:break
+        time.sleep(1)
+    else:raise RuntimeError('Web readiness failed')
+    for s in SERVICES:
+        now=json.loads(output(['docker','inspect',before[s]['Id']]))[0]
+        if not now['State']['Running']:raise RuntimeError('Service stopped: '+s)
+    check_identity(before)
+
+def python_bootstrap():
+    return '''#!/bin/sh
+set -eu
+if [ -f /tmp/hayaegis-restore-env ]; then
+  if [ -d /app/.venv-inplace-previous ]; then rm -rf /app/.venv; mv /app/.venv-inplace-previous /app/.venv; fi
+  rm -f /tmp/hayaegis-restore-env /tmp/hayaegis-venv.tar
+elif [ -f /tmp/hayaegis-venv.tar ]; then
+  test ! -e /app/.venv-inplace-previous
+  mv /app/.venv /app/.venv-inplace-previous
+  tar -C /app -xpf /tmp/hayaegis-venv.tar
+  rm /tmp/hayaegis-venv.tar
+fi
+export UV_NO_DEV=1
+if [ "$1" = run ]; then shift; exec /usr/local/bin/uv-inplace-original run --no-sync "$@"; fi
+exec /usr/local/bin/uv-inplace-original "$@"
+'''
+
+def node_bootstrap():
+    return '''#!/bin/sh
+set -eu
+if [ -f /tmp/hayaegis-restore-env ]; then
+  if [ -d /app/node_modules-inplace-previous ]; then rm -rf /app/node_modules; mv /app/node_modules-inplace-previous /app/node_modules; fi
+  rm /tmp/hayaegis-restore-env
+elif [ -f /tmp/hayaegis-node-modules.tar ]; then
+  test ! -e /app/node_modules-inplace-previous
+  mv /app/node_modules /app/node_modules-inplace-previous
+  tar -C /app -xpf /tmp/hayaegis-node-modules.tar
+  rm /tmp/hayaegis-node-modules.tar
+fi
+exec /usr/local/bin/docker-entrypoint-inplace-original.sh "$@"
+'''
+
+def copy_file(source, cid, destination):
+    source=Path(source)
+    run(['docker','cp','-a',str(source)+('/.' if source.is_dir() else ''),cid+':'+destination])
+
+def agent_override(base, original, active):
+    env={pair.split('=',1)[0]:pair.split('=',1)[1] for pair in original['Config']['Env'] if '=' in pair}
+    agent={'image':original['Image'],'environment':env,'user':original['Config']['User'],'read_only':True,'init':bool(original['HostConfig'].get('Init'))}
+    if active:
+        agent['volumes']=[{'type':'bind','source':str(base/'payload/agent'/n),'target':'/app/'+n,'read_only':True} for n in ['src','skills','package.json','package-lock.json']]
+        agent['volumes'].append({'type':'bind','source':str(base/'build/node-runtime/node_modules'),'target':'/app/node_modules','read_only':True})
+    return {'services':{'agent':agent}}
+
+def recreate_agent(base, original, active):
+    overlay=base/('agent-active.json' if active else 'agent-rollback.json');save(overlay,agent_override(base,original,active))
+    args=['docker','compose','--project-name','hayaegis','-f',str(ROOT/'docker-compose.yml'),'-f',str(ROOT/'docker-compose.override.yml'),'-f',str(overlay)]
+    run(args+['up','-d','--no-build','--no-deps','--pull','never','--force-recreate','agent'],timeout=180)
+    cid=output(args+['ps','-q','agent']).decode().strip()
+    now=json.loads(output(['docker','inspect',cid]))[0]
+    if now['Image']!=original['Image'] or not now['HostConfig']['ReadonlyRootfs']:raise RuntimeError('Agent image/security invariant changed')
+    original_data=[m for m in original['Mounts'] if m['Destination']=='/data/agents']
+    if [m for m in now['Mounts'] if m['Destination']=='/data/agents']!=original_data:raise RuntimeError('Agent state mount changed')
+    save(base/'agent-recreated.json',{'id':cid,'active_artifacts':active})
+    return now
+
+def rollback(base, before):
+    original=json.loads((base/'before.json').read_text())['services']
+    if (base/'agent-recreated.json').exists():
+        before['agent']=recreate_agent(base,original['agent'],False)
+    run(['docker','stop','--time','60',*[before[s]['Id'] for s in SERVICES]],stdout=subprocess.DEVNULL,timeout=300)
+    for s in SERVICES:
+        if before[s]['HostConfig'].get('ReadonlyRootfs'):
+            continue  # Writes were rejected; immutable targets were not modified.
+        destination=base/'rollback'/('extracted-'+s);destination.mkdir(exist_ok=True)
+        run(['tar','-C',str(destination),'-xpf',str(base/'rollback'/(s+'.tar'))])
+        if s in ['api','scheduler']:
+            for name in ['src','cli','scripts','main_api.py','pyproject.toml','uv.lock']:
+                p=destination/'app'/name
+                if p.exists():copy_file(p,before[s]['Id'],'/app/'+name)
+            cli=destination/'usr/local/bin/hayaegis'
+            if cli.exists():copy_file(cli,before[s]['Id'],'/usr/local/bin/hayaegis')
+        elif s=='agent':
+            for name in ['src','skills','package.json','package-lock.json']:
+                copy_file(destination/'app'/name,before[s]['Id'],'/app/'+name)
+        else:copy_file(destination/'usr/share/nginx/html',before[s]['Id'],'/usr/share/nginx/html')
+    marker=base/'rollback/restore-env';marker.touch();marker.chmod(0o644)
+    for s in ['api','scheduler','agent']:
+        if not before[s]['HostConfig'].get('ReadonlyRootfs'):
+            if s in ['api','scheduler']:
+                script=base/'build/uv-bootstrap';script.write_text(python_bootstrap());script.chmod(0o755)
+                copy_file(script,before[s]['Id'],'/usr/local/bin/uv')
+            copy_file(marker,before[s]['Id'],'/tmp/hayaegis-restore-env')
+    run(['docker','start',*[before[s]['Id'] for s in ['api','agent','scheduler','web']]],stdout=subprocess.DEVNULL)
+    ready(before)
+    save(base/'activation.json',{'status':'rolled_back','data_not_downgraded':True})
+
+def require_idle(before):
+    python="from pathlib import Path; import sqlite3; p=Path('/app/data/users/agent-proposals.db'); db=sqlite3.connect('file:'+str(p)+'?mode=ro',uri=True) if p.exists() else None; n=db.execute(\"SELECT COUNT(*) FROM proposals WHERE status='executing'\").fetchone()[0] if db else 0; print('Executing CLI proposals:',n); assert n==0, 'Wait for active CLI operations before deployment'"
+    run(['docker','exec',before['api']['Id'],'/app/.venv/bin/python','-c',python])
+    node="const fs=require('node:fs'),path=require('node:path'),{DatabaseSync}=require('node:sqlite');let n=0;function walk(p,d=0){if(d>6)return;for(const e of fs.readdirSync(p,{withFileTypes:true})){const f=path.join(p,e.name);if(e.isDirectory())walk(f,d+1);else if(e.name==='chat-jobs.sqlite'){const db=new DatabaseSync(f,{readOnly:true});n+=db.prepare(\"SELECT COUNT(*) AS n FROM chat_jobs WHERE status IN ('queued','running')\").get().n;db.close();}}}walk('/data/agents');console.log('Active Agent jobs:',n);if(n)process.exit(3);"
+    run(['docker','exec',before['agent']['Id'],'node','-e',node])
+
+def legacy_activate(base):
+    for marker in ['build-ready.json','backup-ready.json']:
+        if not (base/marker).exists():raise RuntimeError('Missing required gate: '+marker)
+    before=json.loads((base/'before.json').read_text())['services']
+    # A previous safe rollback may have recreated only Agent from the same image.
+    cid=output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service=agent']).decode().strip()
+    agent=json.loads(output(['docker','inspect',cid]))[0]
+    if agent['Image']!=before['agent']['Image']:raise RuntimeError('Agent image changed outside deployment')
+    before['agent']=agent
+    check_identity(before)
+    require_idle(before)
+    for s in ['api','scheduler']:
+        # Only the application directory inode; never recurse into data mounts.
+        run(['docker','exec','--user','0',before[s]['Id'],'chown','1000:1000','/app'])
+    runtime=base/'build/node-runtime';runtime.mkdir(exist_ok=True)
+    if (base/'build/agent-node-modules.tar').exists():
+        run(['tar','-C',str(runtime),'-xpf',str(base/'build/agent-node-modules.tar')])
+    else:raise RuntimeError('Agent runtime dependency artifact is required')
+    ids=[before[s]['Id'] for s in ('scheduler','api','agent','web')]
+    save(base/'activation.json',{'status':'stopping','source':(base/'stamp').read_text().strip()})
+    python=base/'build/uv-bootstrap';python.write_text(python_bootstrap());python.chmod(0o755)
+    node=base/'build/node-bootstrap';node.write_text(node_bootstrap());node.chmod(0o755)
+    try:
+        run(['docker','stop','--time','60',*ids],stdout=subprocess.DEVNULL,timeout=300)
+        run(['docker','cp',before['agent']['Id']+':/data/agents',str(base/'rollback/agent-state')],stdout=subprocess.DEVNULL)
+        for s in ['api','scheduler']:
+            cid=before[s]['Id']
+            for name in ['src','cli','scripts','main_api.py','pyproject.toml','uv.lock','README.md','strategy-runner','assets']:
+                copy_file(base/'payload/app'/name,cid,'/app/'+name)
+            copy_file(base/'build/hayaegis',cid,'/usr/local/bin/hayaegis')
+            copy_file(base/'build/python-venv.tar',cid,'/tmp/hayaegis-venv.tar')
+            copy_file(base/'rollback'/(s+'-uv-original'),cid,'/usr/local/bin/uv-inplace-original')
+            copy_file(python,cid,'/usr/local/bin/uv')
+        before['agent']=recreate_agent(base,before['agent'],True)
+        copy_file(base/'payload/web',before['web']['Id'],'/usr/share/nginx/html')
+        run(['docker','start',*[before[s]['Id'] for s in ['api','scheduler','web']]],stdout=subprocess.DEVNULL)
+        ready(before)
+        save(base/'expected-active.json',before)
+        save(base/'activation.json',{'status':'active','source':(base/'stamp').read_text().strip(),'agent_container_recreated':True,'images_unchanged':True,'data_mounts_unchanged':True})
+        print('Release active; all images/data mounts unchanged; only Agent container recreated.')
+    except BaseException:
+        save(base/'activation.json',{'status':'failed','rollback_required':True})
+        try:rollback(base,before)
+        except BaseException:save(base/'activation.json',{'status':'rollback_failed','operator_action_required':True})
+        raise
+
+def emergency(base):
+    before=json.loads((base/'before.json').read_text())['services']
+    cid=output(['docker','ps','-aq','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service=agent']).decode().strip()
+    before['agent']=json.loads(output(['docker','inspect',cid]))[0]
+    run(['docker','stop','--time','30',before['api']['Id'],before['scheduler']['Id']],stdout=subprocess.DEVNULL,timeout=120)
+    hold=base/'rollback/uv-maintenance';hold.write_text('#!/bin/sh\nexec sleep 3600\n');hold.chmod(0o755)
+    wrapper=base/'rollback/uv-recovery'
+    wrapper.write_text('#!/bin/sh\nset -eu\nexport UV_NO_DEV=1\nif [ "$1" = run ]; then shift; exec /usr/local/bin/uv-inplace-original run --no-sync "$@"; fi\nexec /usr/local/bin/uv-inplace-original "$@"\n');wrapper.chmod(0o755)
+    for s in ['api','scheduler']:
+        cid=before[s]['Id']
+        copy_file(hold,cid,'/usr/local/bin/uv')
+        copy_file(base/'rollback'/(s+'.tar'),cid,'/tmp/hayaegis-original.tar')
+        run(['docker','start',cid],stdout=subprocess.DEVNULL)
+        run(['docker','exec','--user','0',cid,'sh','-c','rm -rf /app/.venv /app/.venv-inplace-previous; tar -C / -xpf /tmp/hayaegis-original.tar app/.venv; chown -R 1000:1000 /app/.venv; rm -f /tmp/hayaegis-original.tar /tmp/hayaegis-venv.tar /tmp/hayaegis-restore-env'],timeout=180)
+        copy_file(wrapper,cid,'/usr/local/bin/uv')
+        run(['docker','restart','--time','10',cid],stdout=subprocess.DEVNULL,timeout=60)
+    ready(before)
+    save(base/'activation.json',{'status':'rolled_back','original_source_restored':True,'data_not_downgraded':True})
+    print('Recovery confirmed: original source and dependencies ready; data preserved.')
+
+def recover(base):
+    original=json.loads((base/'before.json').read_text())['services']
+    now=compose_release(base,original,False);ready(now)
+    save(base/'expected-active.json',now)
+    save(base/'activation.json',{'status':'rolled_back','original_images':True,'data_not_downgraded':True})
+    pointer=base.parent/'current'
+    change=base/'source-change.json'
+    previous=json.loads(change.read_text()).get('previous_bundle') if change.exists() else None
+    if previous and Path(previous).parent==base.parent and (Path(previous)/'expected-active.json').is_file():
+        pointer.write_text(str(Path(previous).resolve())+'\n');pointer.chmod(0o600)
+    elif pointer.exists() and Path(pointer.read_text().strip()).resolve()==base:
+        pointer.unlink()
+    print('Original-image rollback ready; persistent data not downgraded.')
+    print('Original application restored; existing containers and images retained.')
+
+def release_override(base, original, active):
+    services={}
+    stamp=(base/'stamp').read_text().strip()
+    for s in SERVICES:
+        i=original[s]
+        env={pair.split('=',1)[0]:pair.split('=',1)[1] for pair in i['Config']['Env'] if '=' in pair}
+        env['UV_NO_DEV']='1'
+        env['UV_CACHE_DIR']='/tmp/hayaegis-uv-cache'
+        if active:env['GIT_SHA']=stamp
+        cmd=list(i['Config']['Cmd'])
+        if s in ['api','scheduler'] and cmd[:2]==['uv','run'] and '--no-sync' not in cmd:cmd.insert(2,'--no-sync')
+        cfg={'image':i['Image'],'environment':{k:v.replace('$','$$') for k,v in env.items()},'user':i['Config']['User'],'command':cmd,'read_only':bool(i['HostConfig'].get('ReadonlyRootfs')),'init':bool(i['HostConfig'].get('Init'))}
+        if active:
+            mounts=[]
+            if s in ['api','scheduler']:
+                for n in ['src','cli','scripts','main_api.py','pyproject.toml','uv.lock','README.md','strategy-runner','assets']:
+                    mounts.append({'type':'bind','source':str(base/'payload/app'/n),'target':'/app/'+n,'read_only':True})
+                mounts.extend([{'type':'bind','source':str(base/'build/python-runtime/.venv'),'target':'/app/.venv','read_only':True},{'type':'bind','source':str(base/'build/hayaegis'),'target':'/usr/local/bin/hayaegis','read_only':True}])
+            elif s=='agent':mounts=agent_override(base,i,True)['services']['agent']['volumes']
+            else:mounts=[{'type':'bind','source':str(base/'payload/web'),'target':'/usr/share/nginx/html','read_only':True}]
+            cfg['volumes']=mounts
+        else:
+            # Roll back to the actual prior artifact release, not just its base image.
+            targets={'/app/'+n for n in ['src','cli','scripts','main_api.py','pyproject.toml','uv.lock','README.md','strategy-runner','assets','.venv','skills','package.json','package-lock.json','node_modules']}
+            targets.update(['/usr/local/bin/hayaegis','/usr/share/nginx/html'])
+            mounts=[{'type':'bind','source':m['Source'],'target':m['Destination'],'read_only':not m['RW']} for m in i.get('Mounts',[]) if m['Type']=='bind' and m['Destination'] in targets]
+            if mounts:cfg['volumes']=mounts
+        services[s]=cfg
+    return {'services':services}
+
+def compose_release(base, original, active):
+    file=base/('release-active.json' if active else 'release-rollback.json');save(file,release_override(base,original,active))
+    args=['docker','compose','--project-name','hayaegis','-f',str(ROOT/'docker-compose.yml'),'-f',str(ROOT/'docker-compose.override.yml'),'-f',str(file)]
+    run(args+['up','-d','--no-build','--no-deps','--pull','never','--force-recreate',*SERVICES],timeout=240)
+    ids=output(args+['ps','-q',*SERVICES]).decode().split()
+    items=json.loads(output(['docker','inspect',*ids]));now={i['Config']['Labels']['com.docker.compose.service']:i for i in items}
+    for s in SERVICES:
+        if now[s]['Image']!=original[s]['Image']:raise RuntimeError('Image changed: '+s)
+        protected=[m for m in original[s]['Mounts'] if m['Destination'] in ['/app/data','/app/backups','/data/agents','/etc/nginx/conf.d/default.conf']]
+        actual=[m for m in now[s]['Mounts'] if m['Destination'] in ['/app/data','/app/backups','/data/agents','/etc/nginx/conf.d/default.conf']]
+        if sorted(protected,key=lambda m:m['Destination'])!=sorted(actual,key=lambda m:m['Destination']):raise RuntimeError('Persistent mount changed: '+s)
+    return now
+
+def activate(base):
+    for name in ['build-ready.json','backup-ready.json','sandbox-ready.json']:
+        if not (base/name).exists():raise RuntimeError('Missing gate: '+name)
+    original=json.loads((base/'before.json').read_text())['services']
+    current=dict(original)
+    for s in SERVICES:
+        cid=output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service='+s]).decode().strip()
+        current[s]=json.loads(output(['docker','inspect',cid]))[0]
+        if current[s]['Image']!=original[s]['Image']:raise RuntimeError('Current image changed outside deployment')
+    # Fail closed if an overlapping deployment changed the selected artifacts
+    # after inspection/backup. Image equality alone does not detect that race.
+    check_identity(original)
+    change=base/'source-change.json'
+    if change.exists():
+        previous=json.loads(change.read_text()).get('previous_bundle')
+        pointer=base.parent/'current'
+        if previous and (not pointer.exists() or Path(pointer.read_text().strip()).resolve()!=Path(previous).resolve()):
+            raise RuntimeError('Active release changed since this bundle was prepared')
+    require_idle(current)
+    try:
+        save(base/'activation.json',{'status':'activating-readonly-artifacts'})
+        run(['docker','stop','--time','60',*[current[s]['Id'] for s in SERVICES]],stdout=subprocess.DEVNULL,timeout=300)
+        now=compose_release(base,original,True)
+        ready(now)
+        save(base/'expected-active.json',now)
+        save(base/'activation.json',{'status':'active','source':(base/'stamp').read_text().strip(),'images_unchanged':True,'data_mounts_unchanged':True,'containers_recreated':list(SERVICES)})
+        current=base.parent/'current';current.write_text(str(base)+'\n');current.chmod(0o600)
+        print('Release active using existing images and read-only application artifacts.')
+    except BaseException:
+        try:
+            now=compose_release(base,original,False);ready(now)
+            save(base/'activation.json',{'status':'rolled_back','original_images':True,'data_not_downgraded':True})
+        except BaseException:save(base/'activation.json',{'status':'rollback_failed','operator_action_required':True})
+        raise
+
+def sandbox(base):
+    original=json.loads((base/'before.json').read_text())['services']
+    runtime=base/'build/python-runtime';runtime.mkdir(exist_ok=True)
+    run(['tar','-C',str(runtime),'-xpf',str(base/'build/python-venv.tar')])
+    node=base/'build/node-runtime';node.mkdir(exist_ok=True)
+    run(['tar','-C',str(node),'-xpf',str(base/'build/agent-node-modules.tar')])
+    tmp=base/'sandbox';tmp.mkdir(exist_ok=True)
+    for name in ['data','backups','fixtures']:(tmp/name).mkdir(exist_ok=True)
+    (tmp/'fixtures/sitecustomize.py').write_text('import requests\n_original = requests.Session.get\ndef _get(self, url, *args, **kwargs):\n    if url == "https://api.web.finmindtrade.com/v2/user_info":\n        r=requests.Response(); r.status_code=200; r._content=b"{}"; return r\n    return _original(self, url, *args, **kwargs)\nrequests.Session.get = _get\n')
+    image=original['api']['Image'];name='hayaegis-artifact-smoke'
+    args=['docker','run','-d','--name',name,'--network','none','--user','1000:1000','--memory','2g','-e','UV_NO_DEV=1','-e','UV_CACHE_DIR=/tmp/hayaegis-uv-cache','-e','PYTHONPATH=/sandbox-fixtures:/app','-v',str(tmp/'fixtures')+':/sandbox-fixtures:ro']
+    for mount in release_override(base,original,True)['services']['api']['volumes']:
+        args.extend(['-v',mount['source']+':'+mount['target']+':ro'])
+    args.extend(['-v',str(tmp/'data')+':/app/data','-v',str(tmp/'backups')+':/app/backups',image,'uv','run','--no-sync','uvicorn','main_api:app','--host','127.0.0.1','--port','8000'])
+    run(args,stdout=subprocess.DEVNULL)
+    try:
+        for _ in range(30):
+            r=subprocess.run(['docker','exec',name,'/app/.venv/bin/python','-c',"import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8000/health/ready',timeout=3).status==200"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if r.returncode==0:break
+            time.sleep(1)
+        else:
+            with (base/'sandbox-api.log').open('wb') as log:subprocess.run(['docker','logs',name],stdout=log,stderr=subprocess.STDOUT)
+            raise RuntimeError('Artifact sandbox API failed readiness')
+        run(['docker','exec',name,'/usr/local/bin/hayaegis','--version'])
+        run(['docker','exec',name,'/app/.venv/bin/python','-c',"import json; from scripts.sync_agent_cli_contract import contract; from pathlib import Path; assert contract()==json.loads(Path('/app/src/agent_cli_contract.json').read_text()); print('Runtime CLI contract: 118 commands verified')"])
+        save(base/'sandbox-ready.json',{'API_ready':True,'network':'none','production_data_mounted':False,'FinMind_login':'fixture-only','CLI_contract_commands':118})
+    finally:subprocess.run(['docker','rm','--force',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    print('Compiled dependency/source artifacts passed isolated API and CLI validation.')
+
+def verify(base):
+    original=json.loads((base/'before.json').read_text())['services'];now=json.loads((base/'expected-active.json').read_text())
+    ready(now)
+    report={'source':(base/'stamp').read_text().strip(),'services':{},'other_services_unchanged':[]}
+    for s in SERVICES:
+        i=json.loads(output(['docker','inspect',now[s]['Id']]))[0]
+        if i['RestartCount']!=0:raise RuntimeError('Unexpected restart: '+s)
+        oldenv=dict(x.split('=',1) for x in original[s]['Config']['Env'] if '=' in x);newenv=dict(x.split('=',1) for x in i['Config']['Env'] if '=' in x)
+        for k,v in oldenv.items():
+            if k not in ['GIT_SHA','UV_CACHE_DIR','UV_NO_DEV'] and newenv.get(k)!=v:raise RuntimeError('Runtime environment mismatch: '+s+':'+k)
+        if any('/sandbox-fixtures' in m['Destination'] for m in i['Mounts']):raise RuntimeError('Sandbox fixture mounted in production')
+        roots={'api':[(base/'payload/app','/app')],'scheduler':[(base/'payload/app','/app')],'agent':[(base/'payload/agent','/app')],'web':[(base/'payload/web','/usr/share/nginx/html')]}[s]
+        files={}
+        for local,remote in roots:
+            for p in local.rglob('*'):
+                if p.is_file() and '__pycache__' not in p.parts:files[remote+'/'+str(p.relative_to(local))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        code='import json,hashlib,pathlib; expected=json.loads('+repr(json.dumps(files))+'); bad=[p for p,h in expected.items() if hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()!=h]; assert not bad,bad; print(len(expected))'
+        if s in ['api','scheduler']:count=int(output(['docker','exec',i['Id'],'/app/.venv/bin/python','-c',code]))
+        else:
+            code='const fs=require("node:fs"),crypto=require("node:crypto"),e='+json.dumps(files)+';for(const [p,h] of Object.entries(e)){if(crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex")!==h)throw Error("Hash mismatch:"+p)};console.log(Object.keys(e).length)'
+            if s=='agent':count=int(output(['docker','exec',i['Id'],'node','-e',code]))
+            else:
+                count=0
+                for p,h in files.items():
+                    actual=output(['docker','exec',i['Id'],'sha256sum',p]).decode().split()[0]
+                    if actual!=h:raise RuntimeError('Web artifact mismatch: '+p)
+                    count+=1
+        report['services'][s]={'image_unchanged':i['Image']==original[s]['Image'],'restart_count':i['RestartCount'],'health':i['State'].get('Health',{}).get('Status','running'),'verified_source_files':count}
+    for s,i in original.items():
+        if s in SERVICES:continue
+        current=json.loads(output(['docker','inspect',i['Id']]))[0]
+        if not current['State']['Running'] or current['Image']!=i['Image']:raise RuntimeError('Untargeted service changed: '+s)
+        report['other_services_unchanged'].append(s)
+    run(['docker','exec',now['api']['Id'],'/usr/local/bin/hayaegis','--version'])
+    run(['docker','exec',now['api']['Id'],'/app/.venv/bin/python','-c',"import json; from scripts.sync_agent_cli_contract import contract; from pathlib import Path; assert contract()==json.loads(Path('/app/src/agent_cli_contract.json').read_text()); print('Production CLI contract verified: 118 commands')"])
+    expected=(base/'payload/web/index.html').read_bytes();actual=output(['curl','--fail','--silent','--show-error','http://127.0.0.1/'])
+    if actual!=expected:raise RuntimeError('HTTP is not serving the release index')
+    report['frontend_http_matches_release']=True
+    save(base/'verification.json',report);print(json.dumps(report,indent=2))
+
+def restart(base):
+    now=json.loads((base/'expected-active.json').read_text());check_identity(now);require_idle(now)
+    run(['docker','restart','--time','30',*[now[s]['Id'] for s in SERVICES]],stdout=subprocess.DEVNULL,timeout=240)
+    ready(now)
+    print('Application-only restart ready; release mounts preserved, no image builds or dependency restarts.')
+
+def activate_web(base):
+    """Activate one immutable frontend artifact without restarting dependencies."""
+    if SERVICES != ('web',):
+        raise ValueError('activate_web requires service-scope.json to contain only web')
+    for name in ['backup-ready.json', 'web-ready.json']:
+        if not (base/name).exists(): raise RuntimeError('Missing gate: '+name)
+    original=json.loads((base/'before.json').read_text())['services']
+    web=original['web']
+    current_id=output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service=web']).decode().strip()
+    current_web=json.loads(output(['docker','inspect',current_id]))[0]
+    if current_web['Id'] != web['Id'] or current_web['Image'] != web['Image'] or sorted(current_web['Mounts'],key=lambda m:m['Destination']) != sorted(web['Mounts'],key=lambda m:m['Destination']):
+        raise RuntimeError('Web changed after bundle inspection')
+    pointer=base.parent/'current';change=base/'source-change.json'
+    previous=json.loads(change.read_text()).get('previous_bundle') if change.exists() else None
+    if previous and (not pointer.exists() or Path(pointer.read_text().strip()).resolve()!=Path(previous).resolve()):
+        raise RuntimeError('Active release changed since this Web bundle was prepared')
+    try:
+        save(base/'activation.json',{'status':'activating-web-readonly-artifact'})
+        web_now=compose_release(base,original,True)['web']
+        run(['curl','--fail','--silent','--show-error','--max-time','15','http://127.0.0.1/'],stdout=subprocess.DEVNULL)
+        full={}
+        for service in ('api','scheduler','agent','web'):
+            cid=output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service='+service]).decode().strip()
+            full[service]=json.loads(output(['docker','inspect',cid]))[0]
+        full['web']=web_now
+        save(base/'expected-active.json',full)
+        save(base/'activation.json',{'status':'active','source':(base/'stamp').read_text().strip(),'images_unchanged':True,'data_mounts_unchanged':True,'containers_recreated':['web']})
+        current=base.parent/'current';current.write_text(str(base)+'\n');current.chmod(0o600)
+        print('Web release active; API, scheduler, Agent, images and data mounts unchanged.')
+    except BaseException:
+        try:
+            compose_release(base,original,False)
+            save(base/'activation.json',{'status':'rolled_back','original_web_artifact':True})
+        except BaseException:save(base/'activation.json',{'status':'rollback_failed','operator_action_required':True})
+        raise
+
+def verify_web(base):
+    """Verify Web bytes and prove every untargeted application container stayed put."""
+    if SERVICES != ('web',): raise ValueError('verify_web requires Web-only scope')
+    original=json.loads((base/'before.json').read_text())['services']
+    expected=json.loads((base/'expected-active.json').read_text())
+    web=json.loads(output(['docker','inspect',expected['web']['Id']]))[0]
+    if web['Image'] != original['web']['Image'] or not web['State']['Running']:
+        raise RuntimeError('Web image or running state changed')
+    files={}
+    for p in (base/'payload/web').rglob('*'):
+        if p.is_file(): files['/usr/share/nginx/html/'+str(p.relative_to(base/'payload/web'))]=hashlib.sha256(p.read_bytes()).hexdigest()
+    for path,digest in files.items():
+        actual=output(['docker','exec',web['Id'],'sha256sum',path]).decode().split()[0]
+        if actual != digest: raise RuntimeError('Web artifact mismatch: '+path)
+    for service in ('api','scheduler','agent'):
+        cid=output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service='+service]).decode().strip()
+        current=json.loads(output(['docker','inspect',cid]))[0]
+        if current['Id'] != original[service]['Id'] or current['Image'] != original[service]['Image']:
+            raise RuntimeError('Untargeted service changed: '+service)
+    actual=output(['curl','--fail','--silent','--show-error','http://127.0.0.1/'])
+    if actual != (base/'payload/web/index.html').read_bytes(): raise RuntimeError('HTTP is not serving the Web release index')
+    report={'source':(base/'stamp').read_text().strip(),'services':{'web':{'image_unchanged':True,'health':web['State'].get('Health',{}).get('Status','running'),'verified_source_files':len(files)}},'other_services_unchanged':['api','scheduler','agent','fourget','agent-summary','tailscale-stock'],'frontend_http_matches_release':True}
+    save(base/'verification.json',report);print(json.dumps(report,indent=2))
+
+def repair_us(base):
+    """Explicit operator maintenance using the deployed source and baseline lock."""
+    if Path((base.parent/'current').read_text().strip()).resolve()!=base:
+        raise RuntimeError('Repair requires the selected active release')
+    if not (base/'pre-deploy.asbackup').is_file() or not (base/'verification.json').is_file():
+        raise RuntimeError('Backup and deployment verification are mandatory before repair')
+    ids=output(['docker','ps','-q','--filter','label=com.docker.compose.project=hayaegis','--filter','label=com.docker.compose.service=api']).decode().split()
+    if len(ids)!=1:raise RuntimeError('Expected exactly one active HayAegis API')
+    cid=ids[0]
+    script=(base/'repair-us-publication.py').read_text()
+    log=base/'us-publication-repair.log'
+    with log.open('w') as target:
+        run(['docker','exec','-i','-w','/app',cid,'/app/.venv/bin/python','-'],input=script,text=True,stdout=target,stderr=subprocess.STDOUT,timeout=600)
+    log.chmod(0o600)
+    result=json.loads(log.read_text().strip().splitlines()[-1])
+    path=base/'us-publication-repair.json';path.write_text(json.dumps(result,indent=2));path.chmod(0o600)
+    print('US baseline applied; raw OHLCV and existing published revisions unchanged.')
+    print('Seven affected tickers: seven dashboard sparkline points each.')
+    print('Maintenance quality status:',result['maintenance']['markets'][0]['status'],'(invalid legacy rows remain excluded)')
+
+def repair_history(base):
+    """Run owner-authorized chart-only historical maintenance on the active release."""
+    if Path((base.parent/'current').read_text().strip()).resolve()!=base:
+        raise RuntimeError('History repair requires the selected active release')
+    if not (base/'pre-deploy.asbackup').is_file() or not (base/'verification.json').is_file():
+        raise RuntimeError('Verified backup and active deployment are mandatory')
+    active=json.loads((base/'expected-active.json').read_text())
+    check_identity(active)
+    script=(base/'repair-history.py').read_text()
+    with (base/'history-repair.log').open('w') as target:
+        run(['docker','exec','-i','-w','/app',active['api']['Id'],'/app/.venv/bin/python','-'],input=script,text=True,stdout=target,stderr=subprocess.STDOUT,timeout=300)
+    (base/'history-repair.log').chmod(0o600)
+    print('Scoped historical maintenance complete; inspect its private receipt.')
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('phase',choices=['inspect','build','backup','activate','activate_web','recover','emergency','sandbox','verify','verify_web','restart','repair_us','repair_history']);p.add_argument('bundle',type=Path);a=p.parse_args()
+    base=validate(a.bundle)
+    global SERVICES
+    SERVICES=load_service_scope(base)
+    if len(SERVICES)!=4 and a.phase in ['emergency']:
+        raise ValueError('Legacy emergency phase does not support history service scope')
+    if a.phase in ['inspect','build','backup','sandbox'] and (base/'expected-active.json').exists():
+        raise RuntimeError('Registered releases are immutable; prepare a new private bundle')
+    globals()[a.phase](base)
+if __name__=='__main__':main()

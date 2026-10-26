@@ -1,0 +1,16 @@
+# Runtime-only NPU profile; install under /run/systemd/system, not /etc.
+[Unit]
+Description=Komorebi Voice (NPU-only existing-image profile)
+Conflicts=komorebi.service
+Before=komorebi.service
+After=docker.service network-online.target flm-serve.service
+Requires=docker.service flm-serve.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/chihmin/src/komorebi-voice
+ExecStart=/usr/bin/docker compose -f compose.yaml -f /home/chihmin/.hermes/skills/restart-service/scripts/komorebi-npu-only.compose.yaml up -d --no-build
+ExecStop=/usr/bin/docker compose -f compose.yaml -f /home/chihmin/.hermes/skills/restart-service/scripts/komorebi-npu-only.compose.yaml down
+ExecStopPost=/usr/bin/systemctl stop flm-serve.service

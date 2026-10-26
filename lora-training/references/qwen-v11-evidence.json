@@ -1,0 +1,162 @@
+{
+  "record_started_at": "2026-09-17 18:58:11 +0800 CST",
+  "root": "/home/chihmin/qwen-date-audit",
+  "scope": "Narrative reconstruction and hashes of local supporting evidence; not an original chat transcript, full model archive, or new live runtime verification.",
+  "records": [
+    {
+      "path": "REPORT.md",
+      "bytes": 6086,
+      "sha256": "8971609a66e1a1f1eb3a72da6675be349da543575dbf9e94051e298bf9399b96"
+    },
+    {
+      "path": "BUILD-DEBUG.md",
+      "bytes": 2690,
+      "sha256": "28dc6d0b5d2176d57e93f9064abcfb6fc1855eeb6c463e45586cce3d2db516d5"
+    },
+    {
+      "path": "ROCM72-PROGRESS.md",
+      "bytes": 1792,
+      "sha256": "b9168407b9a633f65f8f3906b7f127f16dbf48d36942008ba323be5816aa5bf5"
+    },
+    {
+      "path": "TRAINING-PREFLIGHT.md",
+      "bytes": 2958,
+      "sha256": "a887a899d8e97c4745aa7d8d4bcebe98dd78959173c974b0bfec739fe69cb730"
+    },
+    {
+      "path": "DATE-PILOT.md",
+      "bytes": 2391,
+      "sha256": "0e075e388baff430e164ee7ddf36d344b97850042a4d24f5a57e7b628f49f544"
+    },
+    {
+      "path": "ADAPTER-EVALUATION.md",
+      "bytes": 3978,
+      "sha256": "2a903b4d6fc965f8b49140c90ac82b5f18fa4101d5d871c10f14a84d34eef8ca"
+    },
+    {
+      "path": "REPAIR-ACCEPTANCE.md",
+      "bytes": 2485,
+      "sha256": "632629309337ea370dd1ce22e0780919b7f404d429d73a949f61d9bbffdc7ffa"
+    },
+    {
+      "path": "USER-TRAINING-AUTHORIZATION.json",
+      "bytes": 716,
+      "sha256": "46a223162338d7b0363ef48794efc05dd45c5c07744860a972d1bc1061b48111"
+    },
+    {
+      "path": "GITHUB-BACKUP.json",
+      "bytes": 978,
+      "sha256": "ab1e06de838f6a1d61e11b0bca9ab9d13f360c015d30ba2104d7e5cef11297b1"
+    },
+    {
+      "path": "run_agentic_training.py",
+      "bytes": 7867,
+      "sha256": "08f2bc76fb58011e7703aa63ec3e9a358b092354f5246a09567ea92599a03da6"
+    },
+    {
+      "path": "guarded_agentic_job.py",
+      "bytes": 8254,
+      "sha256": "721b9c7660f8e51b1dedf456dd29528c3b8217e545492990d00767e0051f385a"
+    },
+    {
+      "path": "agentic_training.py",
+      "bytes": 2241,
+      "sha256": "7851312a1998694db0a80ef8d786a63de8357e43b5f7394b1afecb44735c02dd"
+    },
+    {
+      "path": "fact-check-full-v1/FULL-REVIEW.md",
+      "bytes": 167463,
+      "sha256": "d8959e96c6b771218d38f29a28a4cf1fcb4b26ed5581ae6d56813f003f67ad47"
+    },
+    {
+      "path": "fact-check-full-v1/CROSS-CUTTING-REVIEW.md",
+      "bytes": 3573,
+      "sha256": "333bec82ef5a2b9bebb33254ac536addd4845fb52b0d5d2d559834699fe6f8f1"
+    },
+    {
+      "path": "agentic-data-v11-limited-trial/ACCEPTANCE.json",
+      "bytes": 985,
+      "sha256": "ba968e6271322f4e78bbc58c74f82b00c47e2bc5eb36817cdb7137f41f147b60"
+    },
+    {
+      "path": "agentic-data-v11-limited-trial/TRAINING-APPROVAL.json",
+      "bytes": 7770,
+      "sha256": "1e532156e7ff5db5575ba25fcb698c945cd1ec4520fec7a61a2cf9280030c782"
+    },
+    {
+      "path": "agentic-v11-trial-job-02/train/progress.json",
+      "bytes": 959,
+      "sha256": "67d8bcd427bf15ee960f0bd95c21d049b4d70050db588d5a50f7d5026b9b85cc"
+    },
+    {
+      "path": "agentic-v11-trial-job-02/supervisor-result.json",
+      "bytes": 147,
+      "sha256": "60da4d3b2f4bb452816dc169706fe4c0508e89ccc2ed148b691cdf5ea19f15b4"
+    },
+    {
+      "path": "agentic-v11-trial-job-02/train/final-adapter/adapter_config.json",
+      "bytes": 1121,
+      "sha256": "296a8c3e52ca1fc9b9f7ca64684890a083a88791c9392ef77b52ac7e098ebfba"
+    },
+    {
+      "path": "checkpoint-eval-v1/CONTROLLER-STATUS.json",
+      "bytes": 1368,
+      "sha256": "ec3c877c37812198878f37ff9fe028104d3d2abe48c20a912ac131c239664fc3"
+    },
+    {
+      "path": "checkpoint-eval-v1/MODEL-IDENTITY.json",
+      "bytes": 5515,
+      "sha256": "1552ff6b7d0be3a13637c815b0952188adea7f9b0723d54856009d34eddcd99f"
+    },
+    {
+      "path": "deployment-v11/DEPLOYMENT.md",
+      "bytes": 3214,
+      "sha256": "f2db7cbb4de3b9d4e3c44260015bc363e1b82d28acb65c22563e9db05ffa071f"
+    },
+    {
+      "path": "deployment-v11/TENSOR-EQUIVALENCE.json",
+      "bytes": 5557,
+      "sha256": "482e2e2e53e18a5431d6ee2881a04afa1ff81a64fdc82201fd3655ce192de925"
+    },
+    {
+      "path": "deployment-v11/PRODUCTION-VERIFY.json",
+      "bytes": 2414,
+      "sha256": "514eba4f288dcc25be6828bef08a8fb5f25fa4aba31e431e07fc2b56d9ac0209"
+    },
+    {
+      "path": "golden-cache-test/REPORT.md",
+      "bytes": 3685,
+      "sha256": "8288e12440b1cf1c3a8d6cf218cd8defb1c1fff6187376d842fd55184f3e40be"
+    },
+    {
+      "path": "kv-cache-fix/DEPLOYMENT.md",
+      "bytes": 4277,
+      "sha256": "53ce59cfeced94c05cdff874ad036a77d82b9cb2aa8b2effc92e2ad5fe0aba49"
+    },
+    {
+      "path": "kv-cache-fix/INDEPENDENT-REREVIEW.json",
+      "bytes": 1468,
+      "sha256": "1c3f1dc21da0519138f01618ad0cac78202d5cddfd738030209babc028b36555"
+    },
+    {
+      "path": "kv-cache-fix/INDEPENDENT-REREVIEW.hashes.txt",
+      "bytes": 6224,
+      "sha256": "4e830e34d75b8e04e6b5ee12b6fa45d44c2e8f8f1f6a18609f29e40f0b610bbb"
+    },
+    {
+      "path": "kv-cache-fix/INCIDENT-REMEDIATION.json",
+      "bytes": 434,
+      "sha256": "01f21d12ae72a83acb71e58e3b68af5569ba58db3c204bbb2d86a963b0429f09"
+    },
+    {
+      "path": "kv-cache-fix/live-switch/RESULTS.json",
+      "bytes": 5059,
+      "sha256": "c7d6828548749c2d319e9cf14fa04be40e217fae0aa2093dcddb40886a1f1d7c"
+    },
+    {
+      "path": "LORA-TRAINING-END-TO-END-RECORD.zh-TW.md",
+      "bytes": 28626,
+      "sha256": "e481898a3c53b3ed24a455bc8118c0981be20e1cd878c6ade13db8113cd5c699"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert raw git diff to styled HTML5 page and optionally serve it."""
+"""Convert raw git diff to a styled standalone HTML5 file."""
 
 import sys
 import os
@@ -155,8 +155,7 @@ def main():
     print(f"✓ Files changed: {len(files)}")
     print(f"✓ Lines added: {sum(f['additions'] for f in files)}")
     print(f"✓ Lines removed: {sum(f['deletions'] for f in files)}")
-    print(f"\nServe with: cd /tmp && python3 -m http.server 8899")
-    print(f"Open: http://aya.crayfish-monitor.ts.net:8899/git-diff.html")
+    print(f"\nReturn this file directly: [[file: {output_file}]]")
 
 
 if __name__ == '__main__':

@@ -239,7 +239,8 @@ def _lora_chain(loras: list) -> tuple:
 
 
 def _build_workflow(prompt: str, gen_w: int, gen_h: int, seed: int, steps: int,
-                    cfg: float, loras: list, trigger: str, unet: str = ANIMA_UNET) -> dict:
+                    cfg: float, loras: list, trigger: str, unet: str = ANIMA_UNET,
+                    negative_prompt: str = "") -> dict:
     text = trigger + prompt
     lnodes, m, c = _lora_chain(loras)
     wf = {
@@ -247,7 +248,7 @@ def _build_workflow(prompt: str, gen_w: int, gen_h: int, seed: int, steps: int,
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": ANIMA_CLIP, "type": "qwen_image"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": ANIMA_VAE}},
         "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": c, "text": text}},
-        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": c, "text": ""}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": c, "text": negative_prompt}},
         "7": {"class_type": "EmptySD3LatentImage", "inputs": {"width": gen_w, "height": gen_h, "batch_size": 1}},
         "8": {"class_type": "KSampler", "inputs": {
             "model": m, "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["7", 0],
@@ -294,7 +295,7 @@ def _cover_resize(img: Image.Image, w: int, h: int) -> Image.Image:
 
 def _img2img_workflow(prompt: str, image_name: str, gen_w: int, gen_h: int, seed: int,
                       steps: int, cfg: float, denoise: float, loras: list, trigger: str,
-                      unet: str = ANIMA_UNET) -> dict:
+                      unet: str = ANIMA_UNET, negative_prompt: str = "") -> dict:
     text = trigger + prompt
     lnodes, m, c = _lora_chain(loras)
     wf = {
@@ -302,7 +303,7 @@ def _img2img_workflow(prompt: str, image_name: str, gen_w: int, gen_h: int, seed
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": ANIMA_CLIP, "type": "qwen_image"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": ANIMA_VAE}},
         "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": c, "text": text}},
-        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": c, "text": ""}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": c, "text": negative_prompt}},
         "13": {"class_type": "LoadImage", "inputs": {"image": image_name}},
         "14": {"class_type": "VAEEncode", "inputs": {"pixels": ["13", 0], "vae": ["3", 0]}},
         "8": {"class_type": "KSampler", "inputs": {
@@ -426,11 +427,13 @@ def _run_anime_with_comfy(args, t_all: float, ready_seconds: float) -> int:
     final_path = out_dir / f"{prefix}_{final_w}x{final_h}.png"
     meta_path = out_dir / f"{prefix}_timing.json"
 
+    negative_prompt = getattr(args, "negative_prompt", "")
     if is_edit:
         wf = _img2img_workflow(args.prompt, uploaded_name, gen_w, gen_h, seed, steps, cfg,
-                               denoise, loras, trigger, unet)
+                               denoise, loras, trigger, unet, negative_prompt)
     else:
-        wf = _build_workflow(args.prompt, gen_w, gen_h, seed, steps, cfg, loras, trigger, unet)
+        wf = _build_workflow(args.prompt, gen_w, gen_h, seed, steps, cfg, loras, trigger,
+                             unet, negative_prompt)
     t = time.perf_counter()
     pid = _post("/prompt", {"prompt": wf, "client_id": str(uuid.uuid4())})["prompt_id"]
     img_info = None
@@ -486,6 +489,7 @@ def _run_anime_with_comfy(args, t_all: float, ready_seconds: float) -> int:
         "input_image": str(Path(args.image).resolve()) if is_edit else None,
         "denoise": denoise if is_edit else None,
         "prompt": args.prompt,
+        "negative_prompt": negative_prompt,
         "seed": seed,
         "steps": steps,
         "guidance_scale": cfg,

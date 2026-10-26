@@ -2,26 +2,38 @@
 """
 YouTube Summary + Gist Upload
 =============================
-Downloads a YouTube video, transcribes Taiwanese Hokkien with Breeze ASR 26
-or other languages with Whisper Turbo, then generates a Chinese summary
+Downloads YouTube videos, transcribes Taiwanese Hokkien with Breeze ASR 26
+or other languages with Whisper Turbo, then generates a structured summary
 **directly from the transcript** (no external LLM calls).
+
+Supports single video or concurrent multi-video parallel batch processing.
 
 Usage:
     python3 youtube-summary.py <youtube_url> [title]
+    python3 youtube-summary.py <url1> <url2> <url3> [--workers 3]
     python3 youtube-summary.py --asr breeze <youtube_url> [title]  # Taiwanese Hokkien
 
 Environment:
+    YOUTUBE_SUMMARY_PYTHON     -> Python for Whisper worker (default: Breeze ROCm venv)
+    YOUTUBE_SUMMARY_WHISPER_MODEL  -> HF model path or ID
+    YOUTUBE_SUMMARY_WHISPER_LANGUAGE -> Force language (e.g. "english")
+    YOUTUBE_SUMMARY_YT_DLP     -> Path to yt-dlp executable (auto-discovered from PATH/local if omitted)
+    HF_HOME                    -> Hugging Face cache root
     ~/.hermes/.env  -> GITHUB_TOKEN for gist upload
 """
 
 import argparse
-import sys
-import os
+import concurrent.futures
 import json
+import os
+import re
+import shutil
 import subprocess
+import sys
+import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 BREEZE_ASR_URL = "http://127.0.0.1:8025"
@@ -79,6 +91,7 @@ def whisper_environment(base=None):
     environment.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.5.1")
     environment.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
     environment.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+    environment.setdefault("MIOPEN_FIND_MODE", "FAST")
     return environment
 
 
@@ -107,35 +120,79 @@ def get_duration(filepath):
         return 0
 
 
-def find_downloaded_video(work_dir):
-    """Return yt-dlp's downloaded video regardless of its container extension."""
-    candidates = sorted(Path(work_dir).glob("video.*"))
+def find_downloaded_audio(work_dir):
+    """Return yt-dlp downloaded audio file regardless of its container extension."""
+    candidates = sorted(Path(work_dir).glob("audio.*"))
     if not candidates:
-        raise FileNotFoundError(f"yt-dlp did not produce a video in {work_dir}")
+        candidates = sorted(Path(work_dir).glob("video.*"))
+    if not candidates:
+        media_exts = {".webm", ".mp4", ".m4a", ".ogg", ".opus", ".wav", ".mkv"}
+        candidates = sorted([p for p in Path(work_dir).iterdir() if p.suffix.lower() in media_exts])
+    if not candidates:
+        raise FileNotFoundError(f"yt-dlp did not produce an audio file in {work_dir}")
     return str(candidates[0])
 
 
-def download_video(url):
-    """Download video with yt-dlp."""
-    os.makedirs(WORK_DIR, exist_ok=True)
-    os.chdir(WORK_DIR)
+# Backward compatibility alias
+find_downloaded_video = find_downloaded_audio
 
-    print("📥 Downloading video...")
+
+def resolve_yt_dlp():
+    """Resolve the yt-dlp executable path from env, common paths, or PATH."""
+    configured = os.environ.get("YOUTUBE_SUMMARY_YT_DLP")
+    if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
+        return configured
+
+    # Common installation locations
+    common_candidates = [
+        os.path.expanduser("~/.local/bin/yt-dlp"),
+        "/usr/local/bin/yt-dlp",
+        "/usr/bin/yt-dlp",
+    ]
+    for candidate in common_candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    which_candidate = shutil.which("yt-dlp")
+    if which_candidate:
+        return which_candidate
+
+    # Fallback: search PATH manually
+    for dir_path in os.environ.get("PATH", "").split(os.pathsep):
+        if not dir_path:
+            continue
+        candidate = os.path.join(dir_path, "yt-dlp")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        candidate_windows = candidate + ".exe"
+        if os.path.isfile(candidate_windows):
+            return candidate_windows
+    return "yt-dlp"
+
+
+def download_video(url, work_dir=None):
+    """Download audio directly with yt-dlp using reliable player clients in an isolated directory."""
+    target_dir = work_dir or WORK_DIR
+    os.makedirs(target_dir, exist_ok=True)
+
+    yt_dlp = resolve_yt_dlp()
+    out_pattern = os.path.join(target_dir, "audio.%(ext)s")
     run([
-        "yt-dlp", "-f", "bestvideo+bestaudio/best",
-        "-o", "video.%(ext)s",
+        yt_dlp,
+        "--extractor-args", "youtube:player_client=ios,android,web",
+        "-f", "bestaudio/best",
+        "-o", out_pattern,
         url
     ])
-    return find_downloaded_video(WORK_DIR)
+    return find_downloaded_audio(target_dir)
 
 
-def extract_audio(video_path):
-    """Extract and convert audio to Breeze ASR format."""
-    audio_path = os.path.join(WORK_DIR, "audio.ogg")
-    print("🎵 Extracting audio...")
+def extract_audio(video_path, work_dir=None):
+    """Convert downloaded audio to Breeze ASR format (ogg)."""
+    target_dir = work_dir or os.path.dirname(video_path) or WORK_DIR
+    audio_path = os.path.join(target_dir, "audio.ogg")
     run([
         "ffmpeg", "-y", "-i", video_path,
-        "-vn",
         "-acodec", "libopus",
         "-ar", "48000",
         "-ac", "1",
@@ -146,17 +203,16 @@ def extract_audio(video_path):
     return audio_path
 
 
-def get_segments(audio_path):
+def get_segments(audio_path, work_dir=None):
     """Split audio into 28-second segments for Breeze ASR."""
+    target_dir = work_dir or os.path.dirname(audio_path) or WORK_DIR
     total_duration = get_duration(audio_path)
     num_segments = max(1, int((total_duration + BREEZE_ASR_MAX_DURATION - 1) // BREEZE_ASR_MAX_DURATION))
-
-    print(f"🔪 Splitting into {num_segments} segment(s) ({total_duration:.0f}s total)...")
 
     segments = []
     for i in range(num_segments):
         start = i * BREEZE_ASR_MAX_DURATION
-        seg_path = os.path.join(WORK_DIR, f"part{i}.ogg")
+        seg_path = os.path.join(target_dir, f"part{i}.ogg")
         run([
             "ffmpeg", "-y", "-ss", str(start), "-t", str(BREEZE_ASR_MAX_DURATION),
             "-i", audio_path,
@@ -175,7 +231,6 @@ def get_segments(audio_path):
 def transcribe_segment(segment_path):
     """Transcribe a single audio segment with Breeze ASR."""
     with open(segment_path, "rb") as f:
-        # Build multipart form data manually
         boundary = "----form-boundary-123456"
         body = (
             f"--{boundary}\r\n"
@@ -199,27 +254,30 @@ def transcribe_segment(segment_path):
         return result.get("text", ""), result.get("elapsed_s", 0)
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
-        print(f"⚠️  ASR error on segment: {error_body[:200]}")
+        print(f"⚠️  ASR error on segment: {error_body[:200]}", file=sys.stderr)
         return "", 0
     except Exception as e:
-        print(f"⚠️  ASR failed: {e}")
+        print(f"⚠️  ASR failed: {e}", file=sys.stderr)
         return "", 0
 
 
-def transcribe_with_breeze(audio_path):
+def transcribe_with_breeze(audio_path, work_dir=None):
     """Transcribe Taiwanese audio with Breeze ASR 26."""
-    segments = get_segments(audio_path)
+    target_dir = work_dir or os.path.dirname(audio_path) or WORK_DIR
+    segments = get_segments(audio_path, target_dir)
     transcript_segments = []  # (start_s, end_s, text)
     total_elapsed = 0
 
-    print("🎤 Transcribing...")
     for i, seg in enumerate(segments):
         start_s = i * BREEZE_ASR_MAX_DURATION
         text, elapsed = transcribe_segment(seg)
         transcript_segments.append((start_s, start_s + BREEZE_ASR_MAX_DURATION, text))
         total_elapsed += elapsed
-        print(f"  [{i+1}/{len(segments)}] {elapsed:.1f}s -> {len(text)} chars")
-        os.remove(seg)  # Clean up segment
+        if os.path.exists(seg):
+            try:
+                os.remove(seg)
+            except OSError:
+                pass
 
     return "".join(s[2] for s in transcript_segments), transcript_segments, total_elapsed
 
@@ -241,12 +299,10 @@ def normalize_whisper_segments(chunks):
     return normalized
 
 
-def transcribe_with_whisper(audio_path):
-    """Transcribe non-Taiwanese audio through Breeze's Transformers/ROCm path."""
-    output_path = os.path.join(WORK_DIR, "audio.json")
-    print("🎤 Transcribing with Breeze-style Whisper Turbo...")
-    print(f"   Python: {resolve_whisper_python()}")
-    print(f"   Model: {resolve_whisper_model()}")
+def transcribe_with_whisper(audio_path, work_dir=None):
+    """Transcribe non-Taiwanese audio through Breeze Transformers/ROCm path."""
+    target_dir = work_dir or os.path.dirname(audio_path) or WORK_DIR
+    output_path = os.path.join(target_dir, "audio.json")
     started = time.perf_counter()
     run(
         build_whisper_command(audio_path, output_path),
@@ -260,8 +316,8 @@ def transcribe_with_whisper(audio_path):
     return result.get("text", "").strip(), transcript_segments, result.get("elapsed_s", elapsed)
 
 
-def run_whisper_worker(audio_path, output_path, model_path, language=None):
-    """Run inside the Breeze ROCm venv and serialize a Transformers Whisper result."""
+def load_whisper_pipeline(model_path):
+    """Load Whisper once for a persistent batch worker."""
     os.environ.update(whisper_environment())
     import torch
     from transformers import AutomaticSpeechRecognitionPipeline, WhisperForConditionalGeneration, WhisperProcessor
@@ -277,6 +333,7 @@ def run_whisper_worker(audio_path, output_path, model_path, language=None):
     model = WhisperForConditionalGeneration.from_pretrained(
         model_path,
         dtype=dtype,
+        attn_implementation="sdpa",
         low_cpu_mem_usage=True,
     ).to(device).eval()
     pipeline = AutomaticSpeechRecognitionPipeline(
@@ -286,7 +343,11 @@ def run_whisper_worker(audio_path, output_path, model_path, language=None):
         device=0 if device == "cuda" else -1,
         dtype=dtype,
     )
+    return torch, pipeline, device
 
+
+def transcribe_loaded_whisper(torch, pipeline, device, audio_path, language=None):
+    """Transcribe one chunk using an already-loaded Whisper pipeline."""
     started = time.perf_counter()
     generate_kwargs = {"task": "transcribe"}
     if language:
@@ -295,20 +356,52 @@ def run_whisper_worker(audio_path, output_path, model_path, language=None):
         result = pipeline(audio_path, return_timestamps=True, generate_kwargs=generate_kwargs)
         if device == "cuda":
             torch.cuda.synchronize()
-    result = {
+    return {
         "text": result.get("text", "").strip(),
         "chunks": result.get("chunks", []),
         "elapsed_s": time.perf_counter() - started,
     }
-    with open(output_path, "w", encoding="utf-8") as output:
+
+
+def write_whisper_result(result, output_path):
+    """Write a completed chunk result atomically enough for resume-after-stop."""
+    temporary = f"{output_path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as output:
         json.dump(result, output, ensure_ascii=False)
+    os.replace(temporary, output_path)
 
 
-def transcribe_audio(audio_path, asr):
+def run_whisper_worker(audio_path, output_path, model_path, language=None):
+    """Run one standalone Whisper job for backward compatibility."""
+    torch, pipeline, device = load_whisper_pipeline(model_path)
+    write_whisper_result(
+        transcribe_loaded_whisper(torch, pipeline, device, audio_path, language),
+        output_path,
+    )
+
+
+def run_whisper_worker_server(model_path, language=None):
+    """Read JSONL jobs from stdin and process them serially with one loaded model."""
+    torch, pipeline, device = load_whisper_pipeline(model_path)
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        job = json.loads(line)
+        try:
+            result = transcribe_loaded_whisper(
+                torch, pipeline, device, job["audio"], language
+            )
+            write_whisper_result(result, job["output"])
+            print(json.dumps({"ok": True, "output": job["output"]}), flush=True)
+        except Exception as exc:
+            print(json.dumps({"ok": False, "output": job.get("output"), "error": str(exc)}), flush=True)
+
+
+def transcribe_audio(audio_path, asr, work_dir=None):
     """Route transcription to the selected ASR backend."""
     if asr == "breeze":
-        return transcribe_with_breeze(audio_path)
-    return transcribe_with_whisper(audio_path)
+        return transcribe_with_breeze(audio_path, work_dir)
+    return transcribe_with_whisper(audio_path, work_dir)
 
 
 def format_timestamp(seconds):
@@ -326,13 +419,11 @@ def summarize_text(text, max_len=12000):
     if not text.strip():
         return "（無可識別內容）"
 
-    # Clean up text: remove excessive whitespace, normalize punctuation
     clean = " ".join(text.split())
-    clean = clean[:max_len]  # Limit length
+    clean = clean[:max_len]
 
-    # Split into sentences (Chinese-friendly: split on periods, exclamation, question marks)
     sentences = []
-    for s in __import__("re").split(r'(?<=[。！？.!?])\s*', clean):
+    for s in re.split(r"(?<=[。！？.!?])\s*", clean):
         s = s.strip()
         if s:
             sentences.append(s)
@@ -340,18 +431,17 @@ def summarize_text(text, max_len=12000):
     if not sentences:
         return "（無可識別內容）"
 
-    # Heuristic: pick ~3-5 key sentences from different parts of the transcript
-    # Strategy: take first 2, last 2, and a mid-point representative
     n = len(sentences)
     key_indices = set()
-    key_indices.add(0)  # opening
-    key_indices.add(1) if n > 1 else None
-    key_indices.add(n - 2) if n > 2 else None
-    key_indices.add(n - 1) if n > 1 else None
-    # Mid-point
+    key_indices.add(0)
+    if n > 1:
+        key_indices.add(1)
+    if n > 2:
+        key_indices.add(n - 2)
+    if n > 0:
+        key_indices.add(n - 1)
     mid = n // 2
     key_indices.add(mid)
-    # Add a few more distributed
     step = max(1, n // 6)
     for i in range(step, n, step):
         key_indices.add(i)
@@ -361,34 +451,23 @@ def summarize_text(text, max_len=12000):
 
 
 def build_section_breakdown(transcript_segments):
-    """Build a timestamped section breakdown from transcript segments.
-    
-    Groups segments into logical sections by detecting topic changes
-    (based on repeated keyword patterns or time gaps).
-    
-    No external model calls.
-    """
+    """Build a timestamped section breakdown from transcript segments."""
     if not transcript_segments:
-        return "（無分段資訊）"
+        return []
 
-    # Filter out empty segments
     segments = [(s, e, t) for s, e, t in transcript_segments if t.strip()]
     if not segments:
-        return "（無分段資訊）"
+        return []
 
-    # Group segments into sections: every ~15 segments or detect topic shift
-    # Simple approach: group by every N segments, or by time gaps > 5s
     sections = []
-    current_section_start = 0
-    section_size = 10  # segments per section
+    section_size = 10
 
     for i in range(0, len(segments), section_size):
         chunk = segments[i:i + section_size]
         start_ts = format_timestamp(chunk[0][0])
         end_ts = format_timestamp(chunk[-1][1])
-        # Extract first 2 sentences as section topic
         full_text = " ".join(t for _, _, t in chunk)
-        sentences = __import__("re").split(r'(?<=[。！？.!?])\s*', full_text)
+        sentences = re.split(r"(?<=[。！？.!?])\s*", full_text)
         topic_sentences = [s.strip() for s in sentences if s.strip()][:2]
         topic = " ".join(topic_sentences)[:120]
         if not topic:
@@ -400,11 +479,15 @@ def build_section_breakdown(transcript_segments):
 
 def generate_summary(transcript, transcript_segments, video_title, video_url, duration_s):
     """Generate a summary directly from the transcript (no external LLM calls)."""
-    # Get the video title from yt-dlp if not provided
     if not video_title or video_title == "unknown":
         try:
+            yt_dlp = resolve_yt_dlp()
             json_out = run([
-                "yt-dlp", "--skip-download", "-j", video_url
+                yt_dlp,
+                "--extractor-args", "youtube:player_client=ios,android,web",
+                "--skip-download",
+                "-j",
+                video_url
             ], check=False)
             if json_out:
                 data = json.loads(json_out)
@@ -412,10 +495,8 @@ def generate_summary(transcript, transcript_segments, video_title, video_url, du
         except Exception:
             pass
 
-    # Build full summary directly from transcript
     summary_text = summarize_text(transcript)
     sections = build_section_breakdown(transcript_segments)
-
     return summary_text, sections, video_title
 
 
@@ -428,17 +509,10 @@ def _load_content(arg):
 
 
 def upload_to_gist(summary_text, transcript_text, title, youtube_url=""):
-    """Upload summary and transcript to GitHub Gist.
-
-    Auto-detects whether summary_text/transcript_text are file paths or raw
-    content.  File contents are always read into memory before building the
-    API payload — raw paths are never sent to GitHub.
-    """
-    # Auto-detect: read from files if paths exist, else use raw strings
+    """Upload summary and transcript to GitHub Gist."""
     summary_text = _load_content(summary_text)
     transcript_text = _load_content(transcript_text)
 
-    # Read token
     env_path = os.path.expanduser("~/.hermes/.env")
     try:
         with open(env_path) as f:
@@ -447,18 +521,15 @@ def upload_to_gist(summary_text, transcript_text, title, youtube_url=""):
                     token = line.split("=", 1)[1].strip()
                     break
             else:
-                print("❌ GITHUB_TOKEN not found in ~/.hermes/.env")
                 return None
     except FileNotFoundError:
-        print("❌ ~/.hermes/.env not found")
         return None
 
-    # Create formatted summary
-    timestamp = __import__("datetime").datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    timestamp = time.strftime("%Y/%m/%d %H:%M:%S")
     formatted_summary = f"""# 🎬 {title}
 
 **來源**: YouTube
-{f'**原始連結**: {youtube_url}' if youtube_url else ''}
+{f"**原始連結**: {youtube_url}" if youtube_url else ""}
 **上傳時間**: {timestamp}
 
 ---
@@ -469,18 +540,16 @@ def upload_to_gist(summary_text, transcript_text, title, youtube_url=""):
 *Generated by youtube-summary skill*
 """
 
-    # Build payload using Python for safe JSON encoding
     payload = {
         "description": f"YouTube Summary: {title[:80]}",
         "public": True,
         "files": {
             "summary.md": {"content": formatted_summary},
-            "transcript.txt": {"content": transcript_text[:100000]}  # Limit size
+            "transcript.txt": {"content": transcript_text[:100000]}
         }
     }
 
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
     try:
         req = urllib.request.Request(
             "https://api.github.com/gists",
@@ -492,92 +561,82 @@ def upload_to_gist(summary_text, transcript_text, title, youtube_url=""):
                 "User-Agent": "pi-youtube-summary"
             }
         )
-
         resp = urllib.request.urlopen(req, timeout=30)
         gist_data = json.loads(resp.read().decode())
         return gist_data["html_url"]
-
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        print(f"❌ Gist upload failed: HTTP {e.code}")
-        print(error_body[:500])
-        return None
     except Exception as e:
-        print(f"❌ Gist upload error: {e}")
+        print(f"❌ Gist upload error for {title}: {e}", file=sys.stderr)
         return None
 
 
-def cleanup():
+def cleanup(work_dir=None):
     """Clean up temporary files."""
-    import shutil
-    if os.path.exists(WORK_DIR):
-        shutil.rmtree(WORK_DIR)
+    if work_dir and os.path.exists(work_dir):
+        try:
+            shutil.rmtree(work_dir)
+        except OSError:
+            pass
+    elif os.path.exists(WORK_DIR):
+        try:
+            shutil.rmtree(WORK_DIR)
+        except OSError:
+            pass
 
 
-def parse_args(argv=None):
-    """Parse command-line options for the YouTube summary pipeline and worker."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--asr", choices=("whisper", "breeze"), default="whisper",
-        help="Use Breeze ASR 26 (Taiwanese) or the Breeze-style Whisper Turbo worker.",
-    )
-    parser.add_argument("--whisper-worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-audio", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-output", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-model", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-language", help=argparse.SUPPRESS)
-    parser.add_argument("url", nargs="?", help="YouTube video URL")
-    parser.add_argument("title", nargs="?", default="unknown", help="Optional video title")
-    return parser.parse_args(argv)
+def process_single_video(youtube_url, video_title="unknown", asr="whisper", upload_gist_flag=True, verbose=True):
+    """Process a single YouTube video in an isolated working directory."""
+    task_work_dir = tempfile.mkdtemp(prefix="youtube-summary-")
+    result = {
+        "url": youtube_url,
+        "title": video_title,
+        "summary_md": "",
+        "summary_text": "",
+        "transcript": "",
+        "segments": [],
+        "gist_url": None,
+        "elapsed_s": 0,
+        "duration_s": 0,
+        "error": None,
+    }
 
-
-def main():
-    args = parse_args()
-    if args.whisper_worker:
-        if not all((args.worker_audio, args.worker_output, args.worker_model)):
-            raise ValueError("Whisper worker requires audio, output, and model paths")
-        run_whisper_worker(
-            args.worker_audio,
-            args.worker_output,
-            args.worker_model,
-            args.worker_language,
-        )
-        return
-    if not args.url:
-        raise ValueError("YouTube URL is required")
-    youtube_url = args.url
-    video_title = args.title
-
-    print(f"🎯 Processing: {youtube_url}")
-    print(f"📝 Title: {video_title}")
-    print(f"🎙️ ASR: {'Breeze ASR 26 (Taiwanese)' if args.asr == 'breeze' else 'Whisper Turbo'}")
-    print()
+    if verbose:
+        print(f"🎯 [{youtube_url}] Starting processing...")
 
     try:
         # Step 1: Download
-        video_path = download_video(youtube_url)
+        if verbose:
+            print(f"📥 [{youtube_url}] Downloading audio...")
+        video_path = download_video(youtube_url, work_dir=task_work_dir)
 
         # Step 2: Extract audio
-        audio_path = extract_audio(video_path)
+        if verbose:
+            print(f"🎵 [{youtube_url}] Converting audio...")
+        audio_path = extract_audio(video_path, work_dir=task_work_dir)
 
         # Step 3: Transcribe
-        transcript, transcript_segments, elapsed = transcribe_audio(audio_path, args.asr)
+        if verbose:
+            asr_name = "Breeze ASR 26 (Taiwanese)" if asr == "breeze" else "Whisper Turbo"
+            print(f"🎙️ [{youtube_url}] Transcribing with {asr_name}...")
+        transcript, transcript_segments, elapsed = transcribe_audio(audio_path, asr, work_dir=task_work_dir)
+        result["transcript"] = transcript
+        result["segments"] = transcript_segments
+        result["elapsed_s"] = elapsed
 
-        if not transcript.strip():
-            print("⚠️  Transcription returned empty text!")
-            print("   The video might have no speech or music only.")
+        if not transcript.strip() and verbose:
+            print(f"⚠️  [{youtube_url}] Transcription returned empty text (music/silent video).")
 
-        print(f"\n📊 Total transcription time: {elapsed:.1f}s")
-        print(f"📝 Transcript length: {len(transcript)} chars")
-
-        # Step 4: Generate summary directly from transcript (no external LLM)
+        # Step 4: Generate summary
         audio_duration = get_duration(audio_path)
-        summary_text, sections, final_title = generate_summary(transcript, transcript_segments, video_title, youtube_url, audio_duration)
+        result["duration_s"] = audio_duration
+        summary_text, sections, final_title = generate_summary(
+            transcript, transcript_segments, video_title, youtube_url, audio_duration
+        )
+        result["title"] = final_title
+        result["summary_text"] = summary_text
 
         # Build formatted summary markdown
-        timestamp = __import__("datetime").datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        timestamp = time.strftime("%Y/%m/%d %H:%M:%S")
         duration_str = f"{int(audio_duration // 60)} 分 {int(audio_duration % 60)} 秒"
-
         summary_md = f"""# 🎬 {final_title}
 
 **來源**: YouTube
@@ -598,55 +657,164 @@ def main():
 """
         for start_ts, end_ts, topic, chunk in sections:
             summary_md += f"### ⏱️ {start_ts} - {end_ts} 【{topic}】\n"
-            # Include all segment text in this section
             for _, _, text in chunk:
                 if text.strip():
                     summary_md += f"- {text.strip()}\n"
             summary_md += "\n"
 
         summary_md += "---\n*Generated by youtube-summary skill (no external LLM calls)*\n"
+        result["summary_md"] = summary_md
 
-        # Output for display
+        # Gist upload
+        if upload_gist_flag:
+            summary_file = os.path.join(task_work_dir, "summary.md")
+            transcript_file = os.path.join(task_work_dir, "transcript.txt")
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write(summary_md)
+            with open(transcript_file, "w", encoding="utf-8") as f:
+                f.write(transcript)
+            gist_url = upload_to_gist(summary_file, transcript_file, final_title, youtube_url)
+            result["gist_url"] = gist_url
+
+        if verbose:
+            print(f"✅ [{youtube_url}] Finished in {elapsed:.1f}s — '{final_title}'")
+
+    except Exception as e:
+        result["error"] = str(e)
+        if verbose:
+            print(f"❌ [{youtube_url}] Error: {e}", file=sys.stderr)
+    finally:
+        cleanup(task_work_dir)
+
+    return result
+
+
+def parse_args(argv=None):
+    """Parse command-line options for the YouTube summary pipeline and worker."""
+    parser = argparse.ArgumentParser(description="YouTube Summary with ASR + Concurrency")
+    parser.add_argument(
+        "--asr", choices=("whisper", "breeze"), default="whisper",
+        help="Use Breeze ASR 26 (Taiwanese) or Breeze-style Whisper Turbo worker.",
+    )
+    parser.add_argument(
+        "--workers", "-w", type=int, default=3,
+        help="Max concurrent workers for batch processing (default: 3).",
+    )
+    parser.add_argument(
+        "--no-gist", action="store_true",
+        help="Skip uploading to GitHub Gist.",
+    )
+    parser.add_argument("--whisper-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--whisper-worker-server", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-audio", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-output", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-model", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-language", help=argparse.SUPPRESS)
+    parser.add_argument("positionals", nargs="*", help="YouTube URL(s) or URL and optional Title")
+
+    args = parser.parse_args(argv)
+
+    # Reconstruct single URL / title / multi-urls for backward compatibility
+    pos = args.positionals or []
+    if len(pos) == 2 and not pos[1].startswith(("http://", "https://", "youtu.be", "youtube.com")):
+        args.urls = [pos[0]]
+        args.url = pos[0]
+        args.title = pos[1]
+    elif len(pos) >= 1:
+        args.urls = pos
+        args.url = pos[0]
+        args.title = "unknown"
+    else:
+        args.urls = []
+        args.url = None
+        args.title = "unknown"
+
+    return args
+
+
+def main():
+    args = parse_args()
+    if args.whisper_worker_server:
+        if not args.worker_model:
+            raise ValueError("Whisper worker server requires a model path")
+        run_whisper_worker_server(args.worker_model, args.worker_language)
+        return
+    if args.whisper_worker:
+        if not all((args.worker_audio, args.worker_output, args.worker_model)):
+            raise ValueError("Whisper worker requires audio, output, and model paths")
+        run_whisper_worker(
+            args.worker_audio,
+            args.worker_output,
+            args.worker_model,
+            args.worker_language,
+        )
+        return
+
+    if not args.urls:
+        raise ValueError("At least one YouTube URL is required")
+
+    upload_gist = not args.no_gist
+    num_urls = len(args.urls)
+
+    # Single video mode
+    if num_urls == 1:
+        url = args.urls[0]
+        title = args.title
+        res = process_single_video(url, title, asr=args.asr, upload_gist_flag=upload_gist, verbose=True)
+
+        if res["error"]:
+            print(f"\n❌ Pipeline failed: {res['error']}", file=sys.stderr)
+            sys.exit(1)
+
         print(f"\n{'='*60}")
         print("📄 TRANSCRIPT:")
         print(f"{'='*60}")
-        print(transcript)
+        print(res["transcript"])
         print(f"\n{'='*60}")
         print("📝 FORMATTED SUMMARY:")
         print(f"{'='*60}")
-        print(summary_md)
+        print(res["summary_md"])
         print(f"\n{'='*60}")
         print("📋 TRANSCRIPT SEGMENTS (JSON):")
         print(f"{'='*60}")
-        segments_json = json.dumps(transcript_segments, ensure_ascii=False)
-        print(segments_json)
+        print(json.dumps(res["segments"], ensure_ascii=False))
 
-        # Save to files for gist upload
-        os.makedirs(WORK_DIR, exist_ok=True)
-        summary_path = os.path.join(WORK_DIR, "summary.md")
-        transcript_path = os.path.join(WORK_DIR, "transcript.txt")
-        with open(summary_path, "w", encoding="utf-8") as f:
-            f.write(summary_md)
-        with open(transcript_path, "w", encoding="utf-8") as f:
-            f.write(transcript)
+        if res["gist_url"]:
+            print(f"\n✅ Gist URL: {res['gist_url']}")
+        return
 
-        # Upload to gist
-        gist_url = upload_to_gist(summary_path, transcript_path, final_title, youtube_url)
+    # Concurrent Multi-Video Batch Mode
+    print(f"🚀 Launching concurrent batch for {num_urls} videos with {min(num_urls, args.workers)} workers...")
+    t0 = time.time()
+    results = []
 
-        if gist_url:
-            print(f"\n✅ Gist URL: {gist_url}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(num_urls, args.workers)) as executor:
+        future_to_url = {
+            executor.submit(process_single_video, url, "unknown", args.asr, upload_gist, True): url
+            for url in args.urls
+        }
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                data = future.result()
+                results.append(data)
+            except Exception as exc:
+                results.append({"url": url, "title": "Failed", "error": str(exc), "gist_url": None})
+
+    total_time = time.time() - t0
+    print(f"\n{'='*60}")
+    print(f"🎉 BATCH COMPLETED ({len(results)}/{num_urls} processed in {total_time:.1f}s)")
+    print(f"{'='*60}")
+
+    for idx, res in enumerate(results, 1):
+        print(f"\n[{idx}/{len(results)}] {res.get('title', 'Unknown')}")
+        print(f"🔗 URL: {res['url']}")
+        if res.get("gist_url"):
+            print(f"📋 Gist: {res['gist_url']}")
+        if res.get("error"):
+            print(f"⚠️ Error: {res['error']}")
         else:
-            print("\n⚠️ Gist upload failed — check logs above.")
-
-        # Cleanup
-        cleanup()
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        cleanup()
-        sys.exit(1)
+            print(f"📝 Summary:\n{res.get('summary_text', '')}\n")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 ---
 name: youtube-summary
-description: Download a YouTube video, use Breeze ASR 26 for Taiwanese audio or the Breeze-compatible Transformers/ROCm Whisper Turbo pipeline for other languages, then upload the raw transcript and a timestamped section breakdown to GitHub Gist. No external LLM calls. Triggers automatically when a YouTube URL is detected in the user's message. Also triggered by /youtube-summary command.
-version: 1.3.0
-author: AyaSakura / Pi Agent
+description: 偵測到有 YouTube 影片連結（如 youtube.com/watch、youtu.be/、youtube.com/shorts/）時自動觸發讀取此 skill。下載 YouTube 影片音訊，以 Breeze ASR 26（台語）或本機 ROCm Whisper Turbo（其他語言）轉錄並產生結構化摘要與完整逐字稿。支援單支影片或多支影片平行批次處理。亦可使用 /youtube-summary 指令觸發。
+version: 1.4.0
+author: AyaSakura / Hermes Agent
 license: MIT
 metadata:
   hermes:
-    tags: [youtube, summary, transcription, breeze-asr, gist, video, audio, ai]
+    tags: [youtube, summary, transcription, breeze-asr, video, audio, ai, parallel]
 ---
 
 ## Usage
@@ -17,11 +17,12 @@ Manual trigger:
 ```
 /youtube-summary https://youtube.com/watch?v=xxx
 /youtube-summary https://www.youtube.com/shorts/xxx [optional title]
+/youtube-summary <url1> <url2> <url3> [--workers 3]
 ```
 
-# YouTube Summary + Gist Upload
+# YouTube Summary
 
-Downloads a YouTube video, transcribes **Taiwanese Hokkien with Breeze ASR 26** and **all other languages with Whisper Turbo through the Breeze streaming project's Transformers + ROCm pipeline**, then uploads **the raw transcript** and **a timestamped section breakdown** to a GitHub Gist.
+Downloads YouTube video(s), transcribes **Taiwanese Hokkien with Breeze ASR 26** and **all other languages with Whisper Turbo through the Breeze streaming project's Transformers + ROCm pipeline**, then assembles **structured summaries** and **raw transcripts** from the transcription output. Supports concurrent parallel processing for multiple URLs.
 
 No external LLM calls are made — the summary is assembled directly from the transcript segments.
 
@@ -29,9 +30,9 @@ The non-Taiwanese path must not call the standalone `openai-whisper` CLI: on the
 
 ## Workflow
 
-### Step 1: Extract YouTube Link
+### Step 1: Extract YouTube Link(s)
 
-Supports:
+Supports single or multiple URLs:
 - `https://youtube.com/watch?v=...`
 - `https://www.youtube.com/shorts/...`
 - `https://youtu.be/...`
@@ -41,13 +42,18 @@ Supports:
 Choose the ASR before running: use `--asr breeze` only when the video is Taiwanese Hokkien; otherwise leave the default Whisper Turbo.
 
 ```bash
-# Default: Breeze-compatible Whisper Turbo for non-Taiwanese audio
-python3 ~/.pi/agent/skills/media/youtube-summary/scripts/youtube-summary.py \
+# Single Video (Default Whisper Turbo on ROCm)
+python3 ~/.hermes/skills/media/youtube-summary/scripts/youtube-summary.py \
   "https://www.youtube.com/shorts/VIDEO_ID" \
   "Video Title"
 
+# Parallel Batch Processing (Multiple URLs)
+python3 ~/.hermes/skills/media/youtube-summary/scripts/youtube-summary.py \
+  "https://youtu.be/vid1" "https://youtu.be/vid2" "https://youtu.be/vid3" \
+  --workers 3
+
 # Taiwanese Hokkien: Breeze ASR 26
-python3 ~/.pi/agent/skills/media/youtube-summary/scripts/youtube-summary.py \
+python3 ~/.hermes/skills/media/youtube-summary/scripts/youtube-summary.py \
   --asr breeze "https://www.youtube.com/shorts/VIDEO_ID" \
   "台語影片"
 ```
@@ -59,19 +65,13 @@ python3 ~/.pi/agent/skills/media/youtube-summary/scripts/youtube-summary.py \
 
 ### Step 3: Assemble Summary from Transcript
 
-Build the summary directly from the transcript segments (no external model calls):
+Build the summary directly from the transcript segments (no external model calls). Output the summary inline in the chat — do **not** upload to Gist or any external service.
 
 1. **完整摘要** — 3-5 key points extracted from the transcript text
 2. **逐段內容拆解** — Section-by-section breakdown using timestamped segments from the transcript
 3. **重點數據／事實** — Key data points extracted from the transcript
 4. **結論／感想** — Conclusion from the transcript
 5. **【全內容】最後一段的完整內容** — If the last segment is an interview, dialogue, Q&A, tutorial, code walkthrough, or any structured content type, reproduce the **full verbatim content** in this final section.
-
-### Step 4: Upload to Gist
-
-The gist includes **two files**:
-- `summary.md` — Structured summary built directly from the transcript (no external LLM)
-- `transcript.txt` — **Raw, unedited transcript** (完整原始逐字稿)
 
 ## Script Reference
 
@@ -95,42 +95,11 @@ python3 scripts/youtube-summary.py "https://youtube.com/watch?v=..." "Title"
 [[start_s, end_s, "text"], ...]
 ```
 
-### upload-gist.py
-
-Upload to GitHub Gist — **auto-detects file paths vs raw content**:
-
-```python
-# Auto-detects: if arg is an existing file, reads its content; otherwise uses raw text
-python3 scripts/upload-gist.py <summary_file_or_content> <transcript_file_or_content> <title>
-```
-
-**Output:**
-```
-✅ Gist URL: https://gist.github.com/.../xxxxx
-```
-
-**Gist structure:**
-- `summary.md` — Formatted summary (full summary at top)
-- `transcript.txt` — Raw transcript (完整原始逐字稿)
-
-**Note:** The script always reads file content into memory before sending to the API — raw paths are never passed to GitHub. This prevents shell variable expansion issues when passing large text content as arguments.
-
 ## Agent Usage Notes
 
-The entire pipeline is self-contained: download → transcribe → assemble summary from transcript segments → upload to Gist. **No calls to Qwen or any other LLM.**
+The entire pipeline is self-contained: download → transcribe → assemble summary from transcript segments. **No calls to Qwen or any other LLM. No files are uploaded to Gist or any external service.**
 
-When uploading to Gist, **always pass the actual content, not file paths**. However, both scripts now auto-detect:
-
-| Arg type | Behavior |
-|----------|----------|
-| Existing file path | Content is read into memory, then uploaded |
-| Any other text | Treated as raw content and uploaded directly |
-
-This means the agent can safely pass either form — file paths are resolved automatically, and raw content is used as-is. **Shell variable expansion issues (e.g., `ugur-spark-vllm-docker` being treated as a command) are avoided because the scripts read content internally.**
-
-When uploading to Gist, **always pass the actual content, not file paths**. However, both scripts now auto-detect:
-
-## Gist Output Format
+## Output Format
 
 ### summary.md
 
@@ -139,7 +108,6 @@ When uploading to Gist, **always pass the actual content, not file paths**. Howe
 
 **來源**: YouTube
 **原始連結**: https://youtube.com/watch?v=xxx
-**上傳時間**: YYYY/MM/DD HH:MM:SS
 
 ---
 
@@ -337,7 +305,7 @@ When uploading to Gist, **always pass the actual content, not file paths**. Howe
 [完整內容]
 
 ---
-*Generated by youtube-summary skill (no external LLM calls)*
+*Generated by youtube-summary skill (no external LLM calls, no upload)*
 ```
 
 ### transcript.txt
@@ -365,7 +333,28 @@ Override defaults when needed:
 - `YOUTUBE_SUMMARY_PYTHON` — Python executable for the Whisper worker.
 - `YOUTUBE_SUMMARY_WHISPER_MODEL` — local HF snapshot or model ID.
 - `YOUTUBE_SUMMARY_WHISPER_LANGUAGE` — optional forced language such as `english`.
+- `YOUTUBE_SUMMARY_YT_DLP` — full path to yt-dlp executable. If omitted, searches PATH.
 - `HF_HOME` — Hugging Face cache root.
+
+### yt-dlp 環境設定 (yt-dlp Environment Setup)
+
+yt-dlp 通常以 `pip install --user yt-dlp` 安裝到 `~/.local/bin/yt-dlp`，此路徑可能不在 PATH 中。若執行時出現 `FileNotFoundError: [Errno 2] No such file or directory: 'yt-dlp'`，請設定環境變數：
+
+```bash
+export YOUTUBE_SUMMARY_YT_DLP=$HOME/.local/bin/yt-dlp
+```
+
+或將 `~/.local/bin` 加入 PATH：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+驗證安裝：
+
+```bash
+yt-dlp --version  # 應顯示版本號，例如 2026.06.09
+```
 
 ## Error Handling
 
@@ -373,21 +362,20 @@ Override defaults when needed:
 |-------|-----|
 | Breeze ASR 500 | Wrong audio format — ensure opus/48kHz/mono/16k |
 | Long-form error | Audio >30s — split into ≤28s segments |
-| yt-dlp fails | Check URL format or network |
-| video path not found | The script now discovers `video.*`; check the yt-dlp output if no file was produced |
+| yt-dlp not found | `resolve_yt_dlp()` auto-checks `~/.local/bin/yt-dlp`, `/usr/local/bin`, `/usr/bin`, and `PATH` |
+| YouTube 403 Forbidden | Uses `--extractor-args "youtube:player_client=ios,android,web"` and `-f "bestaudio/best"` |
+| audio/video path not found | The script discovers `audio.*`, `video.*`, and common media containers in the work directory |
 | Whisper GPU crash | Confirm the Breeze ROCm venv/model path; do not replace the worker with the standalone `whisper` CLI |
 | invalid Whisper timestamps | The worker drops empty chunks and clamps reversed/missing timestamps |
-| Gist upload fails | Token invalid or no gist scope |
 | Empty transcript | Video has no speech (music only) |
-| Gist content corrupted | Content was passed as shell args with variable expansion — now fixed: scripts auto-detect file paths vs raw content |
+
 
 
 ## Notes
 
 - Always use Python for JSON (avoids shell escaping)
-- Public gists by default
-- **Gist includes BOTH summary.md and raw transcript.txt**
-- Transcript is uploaded **unmodified** (完整原始逐字稿)
+- Output summary and raw transcript are displayed **inline in chat** — nothing is uploaded externally
+- Transcript is presented **unmodified** (完整原始逐字稿)
 - Work dir: `/tmp/youtube-summary` (cleaned up after)
 - Section breakdown uses timestamps: `⏱️ 00:00 - 01:30 【主題】`
 - **Section 5 — 全內容**：If the last segment is an interview, dialogue, Q&A, tutorial, code walkthrough, or any structured content type, reproduce the **full verbatim content** in this section. For interviews, use `**問**：` / `**答**：` format. For tutorials, include complete code/examples. This is the definitive reference section.
